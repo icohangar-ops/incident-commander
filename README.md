@@ -4,7 +4,9 @@
 
 Built for the [CockroachDB × AWS Hackathon: Build with Agentic Memory](https://cockroachdb-ai.devpost.com/)
 
-![Incident Commander Dashboard](thumbnail.png)
+**🚀 Live Demo:** [https://incident-commander-dun.vercel.app](https://incident-commander-dun.vercel.app)
+
+![Incident Commander Dashboard](assets/thumbnail.png)
 
 ## Overview
 
@@ -149,9 +151,17 @@ bun run dev
 curl -X POST http://localhost:3000/api/seed
 ```
 
+## Screenshots
+
+### Dashboard
+![Incident Commander Dashboard](assets/dashboard.png)
+
+### Incident Detail & Agent Pipeline
+![Incident Detail View](assets/incident-detail.png)
+
 ## Demo Video
 
-[Watch the 3-minute demo](DEMO_VIDEO_LINK)
+[Watch the 3-minute demo](assets/incident-commander-demo.webm)
 
 ## How It Works
 
