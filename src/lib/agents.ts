@@ -3,6 +3,11 @@ import { invokeClaude, invokeClaudeJSON, type BedrockMessage } from './bedrock';
 import { uploadArtifact } from './s3';
 import type { Incident, AgentAction, RAGResult } from './types';
 
+// Non-blocking S3 upload (logs error but doesn't fail the agent)
+async function safeUpload(key: string, content: string, contentType?: string) {
+  try { await uploadArtifact(key, content, contentType); } catch (e) { console.warn('S3 upload skipped:', (e as Error).message); }
+}
+
 // Generate a simple deterministic embedding for text (normalized)
 // In production, this would use OpenAI/Titan embeddings
 function textToEmbedding(text: string): number[] {
@@ -166,7 +171,7 @@ You have access to historical incident data via RAG. Use it to inform your triag
   );
 
   // 7. Upload to S3
-  await uploadArtifact(
+  await safeUpload(
     `incidents/${incidentId}/triage.json`,
     JSON.stringify({ incident, triageResult, ragResults, timestamp: new Date().toISOString() }, null, 2)
   );
@@ -218,10 +223,14 @@ Previous agent actions provide context. RAG results contain similar past inciden
 
   const investigationResult = await invokeClaudeJSON<InvestigationResult>(systemPrompt, messages);
 
+  const findings = investigationResult.findings || [];
+  const steps = investigationResult.investigation_steps || [];
+  const relevantRunbooks = investigationResult.relevant_runbooks || [];
+
   // Update incident status
   await query(
     `UPDATE incidents SET status = 'resolving', agent_notes = $1, updated_at = now() WHERE id = $2`,
-    [`${incident.agent_notes || ''}\n\nInvestigation:\nFindings: ${investigationResult.findings.join('; ')}\nRoot cause: ${investigationResult.root_cause_hypothesis}\nSteps: ${investigationResult.investigation_steps.join('; ')}`, incidentId]
+    [`${incident.agent_notes || ''}\n\nInvestigation:\nFindings: ${findings.join('; ')}\nRoot cause: ${investigationResult.root_cause_hypothesis || 'Unknown'}\nSteps: ${steps.join('; ')}`, incidentId]
   );
 
   const duration = Date.now() - start;
@@ -230,7 +239,7 @@ Previous agent actions provide context. RAG results contain similar past inciden
     [incidentId, JSON.stringify({ incident_id: incidentId, rag_count: ragResults.length }), JSON.stringify(investigationResult), duration]
   );
 
-  await uploadArtifact(
+  await safeUpload(
     `incidents/${incidentId}/investigation.json`,
     JSON.stringify({ incident, investigationResult, ragResults, timestamp: new Date().toISOString() }, null, 2)
   );
@@ -284,7 +293,7 @@ export async function runResolutionAgent(incidentId: string): Promise<{ action: 
     [incidentId, JSON.stringify({ incident_id: incidentId }), JSON.stringify(resolutionResult), duration]
   );
 
-  await uploadArtifact(
+  await safeUpload(
     `incidents/${incidentId}/resolution.json`,
     JSON.stringify({ incident, resolutionResult, timestamp: new Date().toISOString() }, null, 2)
   );
@@ -327,7 +336,7 @@ export async function runPostMortemAgent(incidentId: string): Promise<{ action: 
 
   await query(
     `UPDATE incidents SET status = 'post_mortem', agent_notes = $1, updated_at = now() WHERE id = $2`,
-    [`${incident.agent_notes || ''}\n\nPost-Mortem:\nRoot cause: ${postMortemResult.root_cause}\nImpact: ${postMortemResult.impact_assessment}\nLessons: ${postMortemResult.lessons_learned.join('; ')}\nAction items: ${postMortemResult.action_items.join('; ')}`, incidentId]
+    [`${incident.agent_notes || ''}\n\nPost-Mortem:\nRoot cause: ${postMortemResult.root_cause || 'TBD'}\nImpact: ${postMortemResult.impact_assessment || 'TBD'}\nLessons: ${(postMortemResult.lessons_learned || []).join('; ')}\nAction items: ${(postMortemResult.action_items || []).join('; ')}`, incidentId]
   );
 
   const duration = Date.now() - start;
@@ -337,17 +346,23 @@ export async function runPostMortemAgent(incidentId: string): Promise<{ action: 
   );
 
   // Upload post-mortem report to S3
-  const reportMarkdown = `# Post-Mortem: ${incident.title}\n\n**Severity:** ${incident.severity}\n**Created:** ${incident.created_at}\n**Resolved:** ${incident.resolved_at}\n\n## Timeline\n${postMortemResult.timeline.map(t => `- ${t}`).join('\n')}\n\n## Root Cause\n${postMortemResult.root_cause}\n\n## Impact Assessment\n${postMortemResult.impact_assessment}\n\n## Lessons Learned\n${postMortemResult.lessons_learned.map(l => `- ${l}`).join('\n')}\n\n## Action Items\n${postMortemResult.action_items.map(a => `- [ ] ${a}`).join('\n')}\n\n## Prevention Measures\n${postMortemResult.prevention_measures.map(p => `- ${p}`).join('\n')}\n`;
-  await uploadArtifact(
+  const tl = postMortemResult.timeline || [];
+  const ll = postMortemResult.lessons_learned || [];
+  const ai = postMortemResult.action_items || [];
+  const pm = postMortemResult.prevention_measures || [];
+  const reportMarkdown = `# Post-Mortem: ${incident.title}\n\n**Severity:** ${incident.severity}\n**Created:** ${incident.created_at}\n**Resolved:** ${incident.resolved_at}\n\n## Timeline\n${tl.map(t => `- ${t}`).join('\n')}\n\n## Root Cause\n${postMortemResult.root_cause || 'TBD'}\n\n## Impact Assessment\n${postMortemResult.impact_assessment || 'TBD'}\n\n## Lessons Learned\n${ll.map(l => `- ${l}`).join('\n')}\n\n## Action Items\n${ai.map(a => `- [ ] ${a}`).join('\n')}\n\n## Prevention Measures\n${pm.map(p => `- ${p}`).join('\n')}\n`;
+  await safeUpload(
     `incidents/${incidentId}/postmortem.md`,
     reportMarkdown,
     'text/markdown'
   );
 
-  await query(
-    `INSERT INTO s3_artifacts (incident_id, artifact_type, s3_key, s3_bucket, description) VALUES ($1, 'post_mortem', $2, $3, $4)`,
-    [incidentId, `incidents/${incidentId}/postmortem.md`, process.env.S3_BUCKET, `Post-mortem report for ${incident.title}`]
-  );
+  try {
+    await query(
+      `INSERT INTO s3_artifacts (incident_id, artifact_type, s3_key, s3_bucket, description) VALUES ($1, 'post_mortem', $2, $3, $4)`,
+      [incidentId, `incidents/${incidentId}/postmortem.md`, process.env.S3_BUCKET, `Post-mortem report for ${incident.title}`]
+    );
+  } catch (e) { console.warn('S3 artifact record skipped:', (e as Error).message); }
 
   const updatedInc = await query('SELECT * FROM incidents WHERE id = $1', [incidentId]);
   return {
