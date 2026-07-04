@@ -2,6 +2,24 @@ import { query, rowToAction, rowToIncident } from './cockroachdb';
 import { invokeClaude, invokeClaudeJSON, type BedrockMessage } from './bedrock';
 import { uploadArtifact } from './s3';
 import type { Incident, AgentAction, RAGResult } from './types';
+import { getAuditLedger } from './audit/ledger';
+
+// Append a decision/recommendation to the signed, tamper-evident audit ledger.
+// Non-blocking: a ledger failure must never fail an agent run.
+function recordDecision(input: {
+  event: string;
+  actor: string;
+  inputs: unknown;
+  sources: unknown;
+  confidence?: number;
+  rationale?: string;
+}) {
+  try {
+    getAuditLedger().append(input);
+  } catch (e) {
+    console.warn('Audit ledger append skipped:', (e as Error).message);
+  }
+}
 
 // Non-blocking S3 upload (logs error but doesn't fail the agent)
 async function safeUpload(key: string, content: string, contentType?: string) {
@@ -170,6 +188,15 @@ You have access to historical incident data via RAG. Use it to inform your triag
     [incidentId, JSON.stringify({ title: incident.title, description: incident.description }), JSON.stringify(triageResult), duration]
   );
 
+  // 6b. Sign the decision into the tamper-evident audit ledger
+  recordDecision({
+    event: 'triage_incident',
+    actor: 'triage-agent',
+    inputs: { incident_id: incidentId, title: incident.title, description: incident.description, source: incident.source },
+    sources: ragResults.map(r => ({ source_type: r.source_type, source_id: r.source_id, title: r.title, similarity: r.similarity })),
+    rationale: `severity=${newSeverity}; classification=${triageResult.classification}; ${triageResult.initial_assessment}`,
+  });
+
   // 7. Upload to S3
   await safeUpload(
     `incidents/${incidentId}/triage.json`,
@@ -239,6 +266,18 @@ Previous agent actions provide context. RAG results contain similar past inciden
     [incidentId, JSON.stringify({ incident_id: incidentId, rag_count: ragResults.length }), JSON.stringify(investigationResult), duration]
   );
 
+  // Sign the decision into the tamper-evident audit ledger
+  recordDecision({
+    event: 'investigate_incident',
+    actor: 'investigation-agent',
+    inputs: { incident_id: incidentId, severity: incident.severity, agent_notes: incident.agent_notes },
+    sources: {
+      prev_actions: prevActions.map(a => ({ agent_type: a.agent_type, action: a.action })),
+      rag: ragResults.map(r => ({ source_type: r.source_type, source_id: r.source_id, title: r.title, similarity: r.similarity })),
+    },
+    rationale: `root_cause_hypothesis=${investigationResult.root_cause_hypothesis || 'Unknown'}; findings=${findings.join('; ')}`,
+  });
+
   await safeUpload(
     `incidents/${incidentId}/investigation.json`,
     JSON.stringify({ incident, investigationResult, ragResults, timestamp: new Date().toISOString() }, null, 2)
@@ -293,6 +332,15 @@ export async function runResolutionAgent(incidentId: string): Promise<{ action: 
     [incidentId, JSON.stringify({ incident_id: incidentId }), JSON.stringify(resolutionResult), duration]
   );
 
+  // Sign the decision into the tamper-evident audit ledger
+  recordDecision({
+    event: 'resolve_incident',
+    actor: 'resolution-agent',
+    inputs: { incident_id: incidentId, severity: incident.severity },
+    sources: { prev_actions: prevActions.map(a => ({ agent_type: a.agent_type, action: a.action })) },
+    rationale: resolutionResult.resolution_summary,
+  });
+
   await safeUpload(
     `incidents/${incidentId}/resolution.json`,
     JSON.stringify({ incident, resolutionResult, timestamp: new Date().toISOString() }, null, 2)
@@ -344,6 +392,15 @@ export async function runPostMortemAgent(incidentId: string): Promise<{ action: 
     `INSERT INTO agent_actions (incident_id, agent_type, action, input_data, output_data, status, duration_ms) VALUES ($1, 'post_mortem', 'post_mortem_analysis', $2, $3, 'completed', $4) RETURNING *`,
     [incidentId, JSON.stringify({ incident_id: incidentId }), JSON.stringify(postMortemResult), duration]
   );
+
+  // Sign the decision into the tamper-evident audit ledger
+  recordDecision({
+    event: 'post_mortem_analysis',
+    actor: 'post-mortem-agent',
+    inputs: { incident_id: incidentId, severity: incident.severity, resolved_at: incident.resolved_at },
+    sources: { agent_history: prevActions.map(a => ({ agent_type: a.agent_type, action: a.action, status: a.status })) },
+    rationale: `root_cause=${postMortemResult.root_cause || 'TBD'}; impact=${postMortemResult.impact_assessment || 'TBD'}`,
+  });
 
   // Upload post-mortem report to S3
   const tl = postMortemResult.timeline || [];

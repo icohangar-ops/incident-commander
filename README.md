@@ -109,6 +109,59 @@ CREATE TABLE runbooks (
 CREATE VECTOR INDEX idx_runbook_vec ON runbooks (embedding);
 ```
 
+## Signed Audit Ledger
+
+Every decision an agent produces (triage, investigation, resolution, post-mortem)
+is written to a **signed, append-only, tamper-evident audit ledger** in addition
+to the `agent_actions` table. This gives the incident record legal/compliance
+defensibility: any edit, reorder, insertion, or deletion of a past decision is
+detectable.
+
+**Scheme.** The ledger is a JSONL file — one JSON record per line. Each record is:
+
+```jsonc
+{ "ts", "event", "actor", "inputs", "sources", "confidence?", "rationale?",
+  "prevSig", "sig" }
+```
+
+- `sig = HMAC_SHA256(key, canonicalJson({ ...fields, prevSig }))`, hex-encoded.
+- `canonicalJson` serializes object keys in sorted order at every level, so the
+  signed bytes are independent of key insertion order.
+- `prevSig` is the `sig` of the previous line (empty string for the first line).
+  Because each signature commits to the previous one, the lines form a hash
+  chain — tampering with line _i_ invalidates line _i_ and every line after it.
+
+**Key.** The signing key comes from `process.env.AUDIT_LEDGER_KEY`. A documented
+insecure default (`incident-commander-dev-audit-key`) is used when unset so the
+app and tests run out of the box — **set a real key in production.** The ledger
+file location defaults to `.audit/incident-ledger.jsonl` and can be overridden
+with `AUDIT_LEDGER_PATH`.
+
+**API** (`src/lib/audit/ledger.ts`):
+
+```ts
+import { AuditLedger, getAuditLedger } from '@/lib/audit/ledger';
+
+// Append a signed record; returns the record's signature.
+const sig = getAuditLedger().append({
+  event: 'triage_incident',
+  actor: 'triage-agent',
+  inputs: { incident_id, title, description },
+  sources: ragResults,       // provenance the decision drew on
+  rationale: 'severity=high; classification=...',
+});
+
+// Re-walk the chain and report tampering.
+const { intact, tamperedIndex } = AuditLedger.verify(path, key);
+// -> { intact: true, tamperedIndex: null }  when untouched
+// -> { intact: false, tamperedIndex: 2 }    first bad line index
+```
+
+**Tests.** `bun run test` (or `bun test src/lib`) runs
+`src/lib/audit/ledger.test.ts`, which appends N records and asserts the chain is
+intact, then tampers with / deletes a line and asserts `verify` reports the
+correct `tamperedIndex`.
+
 ## Getting Started
 
 ### Prerequisites

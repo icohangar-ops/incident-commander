@@ -7,3 +7,5 @@ download/
 scripts/
 .agent-ctx/
 worklog.md
+# Signed audit ledger (runtime artifact)
+.audit/
