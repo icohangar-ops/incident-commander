@@ -41,6 +41,7 @@ Incident Commander is a multi-agent AI system that autonomously triages, investi
 - **RAG-Powered Memory**: Vector similarity search across past incidents and runbooks
 - **AWS Bedrock Integration**: Claude Sonnet 4 powers all agent reasoning
 - **S3 Artifact Storage**: Post-mortem reports and agent outputs stored in S3
+- **UiPath Intake**: Inbox and attachment handoffs can land incident payloads directly into the incident table
 - **Real-Time Dashboard**: Dark "mission control" UI with severity tracking
 
 ## Tech Stack
