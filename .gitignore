@@ -9,3 +9,4 @@ scripts/
 worklog.md
 # Signed audit ledger (runtime artifact)
 .audit/
+*.tsbuildinfo
