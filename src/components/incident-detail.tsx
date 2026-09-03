@@ -64,10 +64,18 @@ const agentSteps = [
   { key: 'post_mortem', label: 'Post-Mortem', icon: FileText, color: 'text-emerald-400', bgColor: 'bg-emerald-950/50 border-emerald-800/30', activeBg: 'bg-emerald-900/20 border-emerald-700/50' },
 ] as const
 
-function parseOutputData(outputData: string | null): Record<string, unknown> | null {
+type AgentTimelineOutput = {
+  summary?: string | number | boolean | null
+  root_cause?: string | number | boolean | null
+  recommendation?: string | number | boolean | null
+  resolution_steps?: string | number | boolean | null
+  lessons_learned?: string | number | boolean | null
+}
+
+function parseOutputData(outputData: string | null): AgentTimelineOutput | null {
   if (!outputData) return null
   try {
-    return JSON.parse(outputData)
+    return JSON.parse(outputData) as AgentTimelineOutput
   } catch {
     return null
   }
