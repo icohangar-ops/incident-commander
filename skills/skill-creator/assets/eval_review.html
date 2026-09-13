@@ -66,7 +66,7 @@
 
     function render() {
       const tbody = document.getElementById('eval-body');
-      tbody.innerHTML = '';
+      tbody.replaceChildren();
 
       // Sort: should-trigger first, then should-not-trigger
       const sorted = evalItems
@@ -79,24 +79,51 @@
         if (group !== lastGroup) {
           const headerRow = document.createElement('tr');
           headerRow.className = 'section-header';
-          headerRow.innerHTML = `<td colspan="3">${item.should_trigger ? 'Should Trigger' : 'Should NOT Trigger'}</td>`;
+          const headerCell = document.createElement('td');
+          headerCell.colSpan = 3;
+          headerCell.textContent = item.should_trigger ? 'Should Trigger' : 'Should NOT Trigger';
+          headerRow.appendChild(headerCell);
           tbody.appendChild(headerRow);
           lastGroup = group;
         }
 
         const idx = item.origIdx;
         const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td><textarea class="query-input" onchange="updateQuery(${idx}, this.value)">${escapeHtml(item.query)}</textarea></td>
-          <td>
-            <label class="toggle">
-              <input type="checkbox" ${item.should_trigger ? 'checked' : ''} onchange="updateTrigger(${idx}, this.checked)">
-              <span class="slider"></span>
-            </label>
-            <span style="margin-left:8px;font-size:0.8rem;color:#b0aea5">${item.should_trigger ? 'Yes' : 'No'}</span>
-          </td>
-          <td><button class="btn-delete" onclick="deleteRow(${idx})">Delete</button></td>
-        `;
+
+        const tdQuery = document.createElement('td');
+        const textarea = document.createElement('textarea');
+        textarea.className = 'query-input';
+        textarea.value = item.query || '';
+        textarea.onchange = function () { updateQuery(idx, this.value); };
+        tdQuery.appendChild(textarea);
+
+        const tdTrigger = document.createElement('td');
+        const label = document.createElement('label');
+        label.className = 'toggle';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = !!item.should_trigger;
+        checkbox.onchange = function () { updateTrigger(idx, this.checked); };
+        const slider = document.createElement('span');
+        slider.className = 'slider';
+        label.appendChild(checkbox);
+        label.appendChild(slider);
+        const yesNo = document.createElement('span');
+        yesNo.style.cssText = 'margin-left:8px;font-size:0.8rem;color:#b0aea5';
+        yesNo.textContent = item.should_trigger ? 'Yes' : 'No';
+        tdTrigger.appendChild(label);
+        tdTrigger.appendChild(yesNo);
+
+        const tdActions = document.createElement('td');
+        const del = document.createElement('button');
+        del.className = 'btn-delete';
+        del.textContent = 'Delete';
+        del.onclick = function () { deleteRow(idx); };
+        tdActions.appendChild(del);
+
+        tr.appendChild(tdQuery);
+        tr.appendChild(tdTrigger);
+        tr.appendChild(tdActions);
         tbody.appendChild(tr);
       });
       updateSummary();
