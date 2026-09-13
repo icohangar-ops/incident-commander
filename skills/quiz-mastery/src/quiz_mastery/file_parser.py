@@ -2,17 +2,28 @@ from __future__ import annotations
 
 import subprocess
 import zipfile
-import xml.etree.ElementTree as ET
 from pathlib import Path
+
+from defusedxml import ElementTree as ET
 
 
 SUPPORTED_EXTENSIONS = {".md", ".txt", ".text", ".docx", ".pdf", ".ppt", ".pptx"}
 
 
-# ── .docx (zero-dep: zip + xml) ──────────────────────────────────
+def _parse_xml(source):
+    """Parse XML with external entities, DTDs, and network access disabled.
+
+    Office Open XML inside .docx/.pptx is untrusted user input. defusedxml
+    blocks XXE and related entity-expansion attacks that stdlib ElementTree
+    leaves possible depending on the Python build.
+    """
+    return ET.parse(source)
+
+
+# ── .docx (zip + defusedxml) ─────────────────────────────────────
 
 def _parse_docx(file_path: Path) -> str:
-    """Extract text from .docx using stdlib only (zipfile + xml).
+    """Extract text from .docx using zipfile + hardened XML parsing.
 
     .docx is a ZIP archive containing word/document.xml with paragraph data.
     """
@@ -23,7 +34,7 @@ def _parse_docx(file_path: Path) -> str:
         if "word/document.xml" not in zf.namelist():
             raise ValueError("Invalid .docx: word/document.xml not found")
 
-        tree = ET.parse(zf.open("word/document.xml"))
+        tree = _parse_xml(zf.open("word/document.xml"))
         root = tree.getroot()
 
     parts: list[str] = []
@@ -36,10 +47,10 @@ def _parse_docx(file_path: Path) -> str:
     return "\n\n".join(parts)
 
 
-# ── .pptx (zero-dep: zip + xml) ──────────────────────────────────
+# ── .pptx (zip + defusedxml) ─────────────────────────────────────
 
 def _parse_pptx(file_path: Path) -> str:
-    """Extract text from .pptx using stdlib only (zipfile + xml).
+    """Extract text from .pptx using zipfile + hardened XML parsing.
 
     .pptx is a ZIP archive; each slide is at ppt/slides/slideN.xml.
     """
@@ -55,7 +66,7 @@ def _parse_pptx(file_path: Path) -> str:
 
         parts: list[str] = []
         for idx, slide_name in enumerate(slide_names, 1):
-            tree = ET.parse(zf.open(slide_name))
+            tree = _parse_xml(zf.open(slide_name))
             root = tree.getroot()
 
             slide_texts: list[str] = []
@@ -188,7 +199,7 @@ def parse_file(file_path: str) -> str:
 
     Supports: .md, .txt, .text, .docx, .pdf, .ppt, .pptx
 
-    .docx and .pptx use Python stdlib only (zipfile + xml).
+    .docx and .pptx use zipfile + defusedxml (XXE-safe).
     .pdf tries pymupdf → macOS Quartz → pdftotext (graceful fallback).
     .ppt (legacy) tries python-pptx if installed, otherwise asks for conversion.
 
