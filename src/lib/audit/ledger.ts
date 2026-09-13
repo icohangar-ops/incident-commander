@@ -1,6 +1,8 @@
 import { createHmac } from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
+import { confinePath } from '../safe-path';
 
 /**
  * Signed, append-only, tamper-evident audit ledger.
@@ -98,6 +100,15 @@ function resolveKey(explicitKey?: string): string {
 }
 
 /**
+ * Ledger files must stay under cwd (in-tree / AUDIT_LEDGER_PATH) or the OS
+ * temp dir (unit tests write there). Resolved paths that escape those bases
+ * are rejected so `..` / absolute traversal cannot include arbitrary files.
+ */
+function confineLedgerPath(ledgerPath: string): string {
+  return confinePath(ledgerPath, [process.cwd(), os.tmpdir()]);
+}
+
+/**
  * Compute the signature for a record given the previous line's signature.
  * The canonical payload deliberately excludes `sig` (the field being computed)
  * but includes every other field, including `prevSig`, so the chain is bound.
@@ -125,10 +136,11 @@ export class AuditLedger {
 
   /**
    * @param ledgerPath Absolute or cwd-relative path to the JSONL ledger file.
+   *   Resolved and confined to cwd or the OS temp dir; traversal is rejected.
    * @param key Optional explicit signing key (defaults to env / dev default).
    */
   constructor(ledgerPath: string, key?: string) {
-    this.ledgerPath = ledgerPath;
+    this.ledgerPath = confineLedgerPath(ledgerPath);
     this.key = resolveKey(key);
   }
 
@@ -187,11 +199,12 @@ export class AuditLedger {
 
   /** Static reader used by `verify` and callers that only have a path. */
   static readAll(ledgerPath: string): AuditRecord[] {
-    if (!fs.existsSync(ledgerPath)) {
+    const safePath = confineLedgerPath(ledgerPath);
+    if (!fs.existsSync(safePath)) {
       return [];
     }
     return fs
-      .readFileSync(ledgerPath, 'utf8')
+      .readFileSync(safePath, 'utf8')
       .split('\n')
       .filter((l) => l.trim().length > 0)
       .map((l) => JSON.parse(l) as AuditRecord);
@@ -239,10 +252,10 @@ export class AuditLedger {
 
 /** Default on-disk location for the incident-commander signed ledger. */
 export function defaultLedgerPath(): string {
-  return (
+  const raw =
     process.env.AUDIT_LEDGER_PATH ??
-    path.join(process.cwd(), '.audit', 'incident-ledger.jsonl')
-  );
+    path.join(process.cwd(), '.audit', 'incident-ledger.jsonl');
+  return confineLedgerPath(raw);
 }
 
 /** Process-wide shared ledger instance (lazy singleton). */
