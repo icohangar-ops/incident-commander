@@ -1,5 +1,8 @@
 import pg from 'pg';
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { confinePath } from './safe-path';
 import type { Incident, AgentAction, Runbook } from './types';
 
 const { Pool } = pg;
@@ -8,7 +11,12 @@ let pool: pg.Pool | null = null;
 
 export function getPool(): pg.Pool {
   if (!pool) {
-    const certPath = process.env.SSL_CERT_PATH || '/home/z/.postgresql/root.crt';
+    const rawCertPath = process.env.SSL_CERT_PATH || '/home/z/.postgresql/root.crt';
+    const certPath = confinePath(rawCertPath, [
+      process.cwd(),
+      '/home/z/.postgresql',
+      path.join(os.homedir(), '.postgresql'),
+    ]);
     const sslConfig = fs.existsSync(certPath)
       ? { ca: fs.readFileSync(certPath).toString(), rejectUnauthorized: true }
       : { rejectUnauthorized: false };

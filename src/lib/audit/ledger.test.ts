@@ -127,4 +127,28 @@ describe('AuditLedger', () => {
     // Re-verifying with the default key explicitly must succeed.
     expect(AuditLedger.verify(ledgerPath, DEFAULT_AUDIT_KEY).intact).toBe(true);
   });
+
+  it('rejects paths that escape cwd / tmpdir', () => {
+    expect(() => new AuditLedger('../../../../etc/passwd', TEST_KEY)).toThrow(
+      /Path traversal rejected/
+    );
+    expect(() => AuditLedger.readAll('/etc/passwd')).toThrow(
+      /Path traversal rejected/
+    );
+    expect(() => AuditLedger.verify('../../../etc/hosts', TEST_KEY)).toThrow(
+      /Path traversal rejected/
+    );
+  });
+
+  it('accepts a cwd-relative in-tree path', () => {
+    const inTreeDir = path.join(process.cwd(), '.audit-test-confine');
+    const inTree = path.join(inTreeDir, 'ledger.jsonl');
+    try {
+      const ledger = new AuditLedger(inTree, TEST_KEY);
+      ledger.append({ event: 'decision', actor: 'a', inputs: {}, sources: [] });
+      expect(AuditLedger.verify(inTree, TEST_KEY).intact).toBe(true);
+    } finally {
+      fs.rmSync(inTreeDir, { recursive: true, force: true });
+    }
+  });
 });
