@@ -763,11 +763,14 @@
     // ---- Render outputs ----
     function renderOutputs(run) {
       const container = document.getElementById("outputs-body");
-      container.innerHTML = "";
+      container.replaceChildren();
 
       const outputs = run.outputs || [];
       if (outputs.length === 0) {
-        container.innerHTML = '<div class="empty-state">No output files</div>';
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        empty.textContent = "No output files";
+        container.appendChild(empty);
         return;
       }
 
@@ -844,9 +847,19 @@
             container.appendChild(sheetLabel);
           }
 
-          const htmlStr = XLSX.utils.sheet_to_html(ws, { editable: false });
+          const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false });
+          const table = document.createElement("table");
           const wrapper = document.createElement("div");
-          wrapper.innerHTML = htmlStr;
+          rows.forEach((row, ri) => {
+            const tr = document.createElement("tr");
+            (row || []).forEach((cell) => {
+              const cellEl = document.createElement(ri === 0 ? "th" : "td");
+              cellEl.textContent = cell == null ? "" : String(cell);
+              tr.appendChild(cellEl);
+            });
+            table.appendChild(tr);
+          });
+          wrapper.appendChild(table);
           container.appendChild(wrapper);
         }
       } catch (err) {
@@ -873,35 +886,46 @@
       const summary = grading.summary || {};
       const expectations = grading.expectations || [];
 
-      let html = '<div style="padding: 1rem;">';
+      const wrap = document.createElement("div");
+      wrap.style.padding = "1rem";
 
-      // Summary line
       const passRate = summary.pass_rate != null
         ? Math.round(summary.pass_rate * 100) + "%"
         : "?";
       const badgeClass = summary.pass_rate >= 0.8 ? "grade-pass" : summary.pass_rate >= 0.5 ? "" : "grade-fail";
-      html += '<div class="grades-summary">';
-      html += '<span class="grade-badge ' + badgeClass + '">' + passRate + '</span>';
-      html += '<span>' + (summary.passed || 0) + ' passed, ' + (summary.failed || 0) + ' failed of ' + (summary.total || 0) + '</span>';
-      html += '</div>';
+      const summaryRow = document.createElement("div");
+      summaryRow.className = "grades-summary";
+      const badge = document.createElement("span");
+      badge.className = "grade-badge " + badgeClass;
+      badge.textContent = passRate;
+      const summaryTxt = document.createElement("span");
+      summaryTxt.textContent = (summary.passed || 0) + " passed, " + (summary.failed || 0) + " failed of " + (summary.total || 0);
+      summaryRow.appendChild(badge);
+      summaryRow.appendChild(summaryTxt);
+      wrap.appendChild(summaryRow);
 
-      // Assertions list
-      html += '<ul class="assertion-list">';
+      const list = document.createElement("ul");
+      list.className = "assertion-list";
       for (const exp of expectations) {
-        const statusClass = exp.passed ? "pass" : "fail";
-        const statusIcon = exp.passed ? "\u2713" : "\u2717";
-        html += '<li class="assertion-item">';
-        html += '<span class="assertion-status ' + statusClass + '">' + statusIcon + '</span>';
-        html += '<span>' + escapeHtml(exp.text) + '</span>';
+        const li = document.createElement("li");
+        li.className = "assertion-item";
+        const status = document.createElement("span");
+        status.className = "assertion-status " + (exp.passed ? "pass" : "fail");
+        status.textContent = exp.passed ? "\u2713" : "\u2717";
+        const text = document.createElement("span");
+        text.textContent = exp.text || "";
+        li.appendChild(status);
+        li.appendChild(text);
         if (exp.evidence) {
-          html += '<div class="assertion-evidence">' + escapeHtml(exp.evidence) + '</div>';
+          const ev = document.createElement("div");
+          ev.className = "assertion-evidence";
+          ev.textContent = exp.evidence;
+          li.appendChild(ev);
         }
-        html += '</li>';
+        list.appendChild(li);
       }
-      html += '</ul>';
-
-      html += '</div>';
-      content.innerHTML = html;
+      wrap.appendChild(list);
+      content.replaceChildren(wrap);
     }
 
     function toggleGrades() {
@@ -928,7 +952,7 @@
       document.getElementById("prev-outputs-arrow").classList.remove("open");
 
       // Render the files into the content area
-      content.innerHTML = "";
+      content.replaceChildren();
       const wrapper = document.createElement("div");
       wrapper.style.padding = "1rem";
 
@@ -1122,20 +1146,24 @@
       const summary = data.run_summary || {};
       const metadata = data.metadata || {};
       const notes = data.notes || [];
+      const frag = document.createDocumentFragment();
 
-      let html = "";
-
-      // Header
-      html += "<h2 style='font-family: Poppins, sans-serif; margin-bottom: 0.5rem;'>Benchmark Results</h2>";
-      html += "<p style='color: var(--text-muted); font-size: 0.875rem; margin-bottom: 1.25rem;'>";
-      if (metadata.skill_name) html += "<strong>" + escapeHtml(metadata.skill_name) + "</strong> &mdash; ";
-      if (metadata.timestamp) html += metadata.timestamp + " &mdash; ";
-      if (metadata.evals_run) html += "Evals: " + metadata.evals_run.join(", ") + " &mdash; ";
-      html += (metadata.runs_per_configuration || "?") + " runs per configuration";
-      html += "</p>";
-
-      // Summary table
-      html += '<table class="benchmark-table">';
+      function el(tag, attrs) {
+        const n = document.createElement(tag);
+        const kids = Array.prototype.slice.call(arguments, 2);
+        if (attrs) {
+          if (attrs.className) n.className = attrs.className;
+          if (attrs.style) n.setAttribute("style", attrs.style);
+          if (attrs.title) n.title = attrs.title;
+        }
+        kids.flat().forEach(function (c) {
+          if (c == null || c === false) return;
+          n.appendChild(typeof c === "string" || typeof c === "number"
+            ? document.createTextNode(String(c))
+            : c);
+        });
+        return n;
+      }
 
       function fmtStat(stat, pct) {
         if (!stat) return "—";
@@ -1153,7 +1181,17 @@
         return "";
       }
 
-      // Discover config names dynamically (everything except "delta")
+      frag.appendChild(el("h2", { style: "font-family: Poppins, sans-serif; margin-bottom: 0.5rem;" }, "Benchmark Results"));
+      const headerP = el("p", { style: "color: var(--text-muted); font-size: 0.875rem; margin-bottom: 1.25rem;" });
+      if (metadata.skill_name) {
+        headerP.appendChild(el("strong", null, metadata.skill_name));
+        headerP.appendChild(document.createTextNode(" \u2014 "));
+      }
+      if (metadata.timestamp) headerP.appendChild(document.createTextNode(metadata.timestamp + " \u2014 "));
+      if (metadata.evals_run) headerP.appendChild(document.createTextNode("Evals: " + metadata.evals_run.join(", ") + " \u2014 "));
+      headerP.appendChild(document.createTextNode((metadata.runs_per_configuration || "?") + " runs per configuration"));
+      frag.appendChild(headerP);
+
       const configs = Object.keys(summary).filter(k => k !== "delta");
       const configA = configs[0] || "config_a";
       const configB = configs[1] || "config_b";
@@ -1163,101 +1201,101 @@
       const b = summary[configB] || {};
       const delta = summary.delta || {};
 
-      html += "<thead><tr><th>Metric</th><th>" + escapeHtml(labelA) + "</th><th>" + escapeHtml(labelB) + "</th><th>Delta</th></tr></thead>";
-      html += "<tbody>";
-
-      html += "<tr><td><strong>Pass Rate</strong></td>";
-      html += "<td>" + fmtStat(a.pass_rate, true) + "</td>";
-      html += "<td>" + fmtStat(b.pass_rate, true) + "</td>";
-      html += '<td class="' + deltaClass(delta.pass_rate) + '">' + (delta.pass_rate || "—") + "</td></tr>";
-
-      // Time (only show row if data exists)
+      const summaryTable = el("table", { className: "benchmark-table" });
+      const thead = el("thead", null, el("tr", null,
+        el("th", null, "Metric"), el("th", null, labelA), el("th", null, labelB), el("th", null, "Delta")
+      ));
+      const tbody = document.createElement("tbody");
+      tbody.appendChild(el("tr", null,
+        el("td", null, el("strong", null, "Pass Rate")),
+        el("td", null, fmtStat(a.pass_rate, true)),
+        el("td", null, fmtStat(b.pass_rate, true)),
+        el("td", { className: deltaClass(delta.pass_rate) }, delta.pass_rate || "—")
+      ));
       if (a.time_seconds || b.time_seconds) {
-        html += "<tr><td><strong>Time (s)</strong></td>";
-        html += "<td>" + fmtStat(a.time_seconds, false) + "</td>";
-        html += "<td>" + fmtStat(b.time_seconds, false) + "</td>";
-        html += '<td class="' + deltaClass(delta.time_seconds) + '">' + (delta.time_seconds ? delta.time_seconds + "s" : "—") + "</td></tr>";
+        tbody.appendChild(el("tr", null,
+          el("td", null, el("strong", null, "Time (s)")),
+          el("td", null, fmtStat(a.time_seconds, false)),
+          el("td", null, fmtStat(b.time_seconds, false)),
+          el("td", { className: deltaClass(delta.time_seconds) }, delta.time_seconds ? delta.time_seconds + "s" : "—")
+        ));
       }
-
-      // Tokens (only show row if data exists)
       if (a.tokens || b.tokens) {
-        html += "<tr><td><strong>Tokens</strong></td>";
-        html += "<td>" + fmtStat(a.tokens, false) + "</td>";
-        html += "<td>" + fmtStat(b.tokens, false) + "</td>";
-        html += '<td class="' + deltaClass(delta.tokens) + '">' + (delta.tokens || "—") + "</td></tr>";
+        tbody.appendChild(el("tr", null,
+          el("td", null, el("strong", null, "Tokens")),
+          el("td", null, fmtStat(a.tokens, false)),
+          el("td", null, fmtStat(b.tokens, false)),
+          el("td", { className: deltaClass(delta.tokens) }, delta.tokens || "—")
+        ));
       }
+      summaryTable.appendChild(thead);
+      summaryTable.appendChild(tbody);
+      frag.appendChild(summaryTable);
 
-      html += "</tbody></table>";
-
-      // Per-eval breakdown (if runs data available)
       const runs = data.runs || [];
       if (runs.length > 0) {
-        const evalIds = [...new Set(runs.map(r => r.eval_id))].sort((a, b) => a - b);
-
-        html += "<h3 style='font-family: Poppins, sans-serif; margin-bottom: 0.75rem;'>Per-Eval Breakdown</h3>";
-
+        const evalIds = [...new Set(runs.map(r => r.eval_id))].sort((x, y) => x - y);
+        frag.appendChild(el("h3", { style: "font-family: Poppins, sans-serif; margin-bottom: 0.75rem;" }, "Per-Eval Breakdown"));
         const hasTime = runs.some(r => r.result && r.result.time_seconds != null);
         const hasErrors = runs.some(r => r.result && r.result.errors > 0);
 
         for (const evalId of evalIds) {
           const evalRuns = runs.filter(r => r.eval_id === evalId);
           const evalName = evalRuns[0] && evalRuns[0].eval_name ? evalRuns[0].eval_name : "Eval " + evalId;
+          frag.appendChild(el("h4", { style: "font-family: Poppins, sans-serif; margin: 1rem 0 0.5rem; color: var(--text);" }, evalName));
 
-          html += "<h4 style='font-family: Poppins, sans-serif; margin: 1rem 0 0.5rem; color: var(--text);'>" + escapeHtml(evalName) + "</h4>";
-          html += '<table class="benchmark-table">';
-          html += "<thead><tr><th>Config</th><th>Run</th><th>Pass Rate</th>";
-          if (hasTime) html += "<th>Time (s)</th>";
-          if (hasErrors) html += "<th>Crashes During Execution</th>";
-          html += "</tr></thead>";
-          html += "<tbody>";
+          const evTable = el("table", { className: "benchmark-table" });
+          const evHeadRow = el("tr", null, el("th", null, "Config"), el("th", null, "Run"), el("th", null, "Pass Rate"));
+          if (hasTime) evHeadRow.appendChild(el("th", null, "Time (s)"));
+          if (hasErrors) evHeadRow.appendChild(el("th", null, "Crashes During Execution"));
+          evTable.appendChild(el("thead", null, evHeadRow));
+          const evBody = document.createElement("tbody");
 
-          // Group by config and render with average rows
           const configGroups = [...new Set(evalRuns.map(r => r.configuration))];
           for (let ci = 0; ci < configGroups.length; ci++) {
             const config = configGroups[ci];
             const configRuns = evalRuns.filter(r => r.configuration === config);
             if (configRuns.length === 0) continue;
-
             const rowClass = ci === 0 ? "benchmark-row-with" : "benchmark-row-without";
             const configLabel = config.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
 
             for (const run of configRuns) {
               const r = run.result || {};
               const prClass = r.pass_rate >= 0.8 ? "benchmark-delta-positive" : r.pass_rate < 0.5 ? "benchmark-delta-negative" : "";
-              html += '<tr class="' + rowClass + '">';
-              html += "<td>" + configLabel + "</td>";
-              html += "<td>" + run.run_number + "</td>";
-              html += '<td class="' + prClass + '">' + ((r.pass_rate || 0) * 100).toFixed(0) + "% (" + (r.passed || 0) + "/" + (r.total || 0) + ")</td>";
-              if (hasTime) html += "<td>" + (r.time_seconds != null ? r.time_seconds.toFixed(1) : "—") + "</td>";
-              if (hasErrors) html += "<td>" + (r.errors || 0) + "</td>";
-              html += "</tr>";
+              const tr = el("tr", { className: rowClass },
+                el("td", null, configLabel),
+                el("td", null, String(run.run_number)),
+                el("td", { className: prClass }, ((r.pass_rate || 0) * 100).toFixed(0) + "% (" + (r.passed || 0) + "/" + (r.total || 0) + ")")
+              );
+              if (hasTime) tr.appendChild(el("td", null, r.time_seconds != null ? r.time_seconds.toFixed(1) : "—"));
+              if (hasErrors) tr.appendChild(el("td", null, String(r.errors || 0)));
+              evBody.appendChild(tr);
             }
 
-            // Average row
             const rates = configRuns.map(r => (r.result || {}).pass_rate || 0);
-            const avgRate = rates.reduce((a, b) => a + b, 0) / rates.length;
+            const avgRate = rates.reduce((x, y) => x + y, 0) / rates.length;
             const avgPrClass = avgRate >= 0.8 ? "benchmark-delta-positive" : avgRate < 0.5 ? "benchmark-delta-negative" : "";
-            html += '<tr class="benchmark-row-avg ' + rowClass + '">';
-            html += "<td>" + configLabel + "</td>";
-            html += "<td>Avg</td>";
-            html += '<td class="' + avgPrClass + '">' + (avgRate * 100).toFixed(0) + "%</td>";
+            const avgTr = el("tr", { className: "benchmark-row-avg " + rowClass },
+              el("td", null, configLabel),
+              el("td", null, "Avg"),
+              el("td", { className: avgPrClass }, (avgRate * 100).toFixed(0) + "%")
+            );
             if (hasTime) {
               const times = configRuns.map(r => (r.result || {}).time_seconds).filter(t => t != null);
-              html += "<td>" + (times.length ? (times.reduce((a, b) => a + b, 0) / times.length).toFixed(1) : "—") + "</td>";
+              avgTr.appendChild(el("td", null, times.length ? (times.reduce((x, y) => x + y, 0) / times.length).toFixed(1) : "—"));
             }
-            if (hasErrors) html += "<td></td>";
-            html += "</tr>";
+            if (hasErrors) avgTr.appendChild(el("td", null, ""));
+            evBody.appendChild(avgTr);
           }
-          html += "</tbody></table>";
+          evTable.appendChild(evBody);
+          frag.appendChild(evTable);
 
-          // Per-assertion detail for this eval
           const runsWithExpectations = {};
           for (const config of configGroups) {
             runsWithExpectations[config] = evalRuns.filter(r => r.configuration === config && r.expectations && r.expectations.length > 0);
           }
-          const hasAnyExpectations = Object.values(runsWithExpectations).some(runs => runs.length > 0);
+          const hasAnyExpectations = Object.values(runsWithExpectations).some(list => list.length > 0);
           if (hasAnyExpectations) {
-            // Collect all unique assertion texts across all configs
             const allAssertions = [];
             const seen = new Set();
             for (const config of configGroups) {
@@ -1271,50 +1309,47 @@
               }
             }
 
-            html += '<table class="benchmark-table" style="margin-top: 0.5rem;">';
-            html += "<thead><tr><th>Assertion</th>";
+            const asTable = el("table", { className: "benchmark-table", style: "margin-top: 0.5rem;" });
+            const asHead = el("tr", null, el("th", null, "Assertion"));
             for (const config of configGroups) {
               const label = config.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
-              html += "<th>" + escapeHtml(label) + "</th>";
+              asHead.appendChild(el("th", null, label));
             }
-            html += "</tr></thead><tbody>";
-
+            asTable.appendChild(el("thead", null, asHead));
+            const asBody = document.createElement("tbody");
             for (const assertionText of allAssertions) {
-              html += "<tr><td>" + escapeHtml(assertionText) + "</td>";
-
+              const tr = el("tr", null, el("td", null, assertionText));
               for (const config of configGroups) {
-                html += "<td>";
+                const td = document.createElement("td");
                 for (const run of runsWithExpectations[config]) {
                   const exp = (run.expectations || []).find(e => e.text === assertionText);
                   if (exp) {
-                    const cls = exp.passed ? "benchmark-delta-positive" : "benchmark-delta-negative";
-                    const icon = exp.passed ? "\u2713" : "\u2717";
-                    html += '<span class="' + cls + '" title="Run ' + run.run_number + ': ' + escapeHtml(exp.evidence || "") + '">' + icon + "</span> ";
+                    td.appendChild(el("span", {
+                      className: exp.passed ? "benchmark-delta-positive" : "benchmark-delta-negative",
+                      title: "Run " + run.run_number + ": " + (exp.evidence || "")
+                    }, exp.passed ? "\u2713" : "\u2717"));
+                    td.appendChild(document.createTextNode(" "));
                   } else {
-                    html += "— ";
+                    td.appendChild(document.createTextNode("— "));
                   }
                 }
-                html += "</td>";
+                tr.appendChild(td);
               }
-              html += "</tr>";
+              asBody.appendChild(tr);
             }
-            html += "</tbody></table>";
+            asTable.appendChild(asBody);
+            frag.appendChild(asTable);
           }
         }
       }
 
-      // Notes
       if (notes.length > 0) {
-        html += '<div class="benchmark-notes">';
-        html += "<h3>Analysis Notes</h3>";
-        html += "<ul>";
-        for (const note of notes) {
-          html += "<li>" + escapeHtml(note) + "</li>";
-        }
-        html += "</ul></div>";
+        const ul = document.createElement("ul");
+        for (const note of notes) ul.appendChild(el("li", null, note));
+        frag.appendChild(el("div", { className: "benchmark-notes" }, el("h3", null, "Analysis Notes"), ul));
       }
 
-      container.innerHTML = html;
+      container.replaceChildren(frag);
     }
 
     // ---- Start ----

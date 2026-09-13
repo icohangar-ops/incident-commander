@@ -6,6 +6,21 @@ import base64
 import mimetypes
 import urllib.request
 
+
+def _esc(value) -> str:
+    """HTML-escape untrusted text interpolated into the gift card."""
+    return html.escape("" if value is None else str(value), quote=True)
+
+
+def _safe_src(src: str) -> str:
+    """Allow only http(s) or data:image URLs in <img src>."""
+    s = (src or "").strip()
+    lower = s.lower()
+    if lower.startswith(("https://", "http://", "data:image/")):
+        return html.escape(s, quote=True)
+    return ""
+
+
 def generate_gift_card(product_name, price, evaluation, thank_you_json, return_gift_json, vibe_code, image_url, output_path="gift_card_result.html"):
     """
     生成现代风格的交互式礼品鉴定卡片。
@@ -86,15 +101,15 @@ def generate_gift_card(product_name, price, evaluation, thank_you_json, return_g
     thank_you_html = ""
     for item in thank_you_data:
         thank_you_html += f"""
-        <div class="group relative p-4 rounded-xl {bubble_bg} border {bubble_hover} transition-all cursor-pointer mb-3" onclick="copyText(this, '{html.escape(item['content'], quote=True)}')">
+        <div class="group relative p-4 rounded-xl {bubble_bg} border {bubble_hover} transition-all cursor-pointer mb-3" data-copy="{_esc(item.get('content', ''))}" onclick="copyText(this)">
             <div class="flex justify-between items-center mb-2">
-                <span class="text-xs font-bold {st['accent']} border border-current px-2 py-0.5 rounded-full">{item['style']}</span>
+                <span class="text-xs font-bold {st['accent']} border border-current px-2 py-0.5 rounded-full">{_esc(item.get('style', ''))}</span>
                 <span class="text-[10px] opacity-60 group-hover:opacity-100 transition-opacity {st['text_sub']} flex items-center gap-1">
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
                     点击复制
                 </span>
             </div>
-            <p class="text-sm {st['text_main']} leading-relaxed opacity-95 font-medium">{item['content']}</p>
+            <p class="text-sm {st['text_main']} leading-relaxed opacity-95 font-medium">{_esc(item.get('content', ''))}</p>
             <div class="copy-feedback absolute inset-0 bg-{st['accent'].split('-')[1]}-500 text-white flex items-center justify-center rounded-xl opacity-0 pointer-events-none transition-opacity duration-200 font-bold z-10">
                 <span>✓ 已复制</span>
             </div>
@@ -107,10 +122,10 @@ def generate_gift_card(product_name, price, evaluation, thank_you_json, return_g
         <div class="p-4 rounded-xl {bubble_bg} border flex flex-col justify-between h-full hover:scale-[1.02] transition-transform duration-300">
             <div class="flex items-center gap-2 mb-2">
                  <div class="w-1.5 h-1.5 rounded-full bg-current {st['accent']}"></div>
-                 <div class="text-xs font-bold uppercase tracking-wider {st['text_sub']}">{item['target']}</div>
+                 <div class="text-xs font-bold uppercase tracking-wider {st['text_sub']}">{_esc(item.get('target', ''))}</div>
             </div>
-            <div class="font-bold {st['text_main']} text-lg mb-2">{item['item']}</div>
-            <div class="text-xs {st['text_sub']} opacity-80 leading-snug bg-black/5 dark:bg-white/5 p-2 rounded">{item['reason']}</div>
+            <div class="font-bold {st['text_main']} text-lg mb-2">{_esc(item.get('item', ''))}</div>
+            <div class="text-xs {st['text_sub']} opacity-80 leading-snug bg-black/5 dark:bg-white/5 p-2 rounded">{_esc(item.get('reason', ''))}</div>
         </div>
         """
 
@@ -138,7 +153,7 @@ def generate_gift_card(product_name, price, evaluation, thank_you_json, return_g
         <div class="w-full md:w-[45%] flex flex-col relative shrink-0 border-b md:border-b-0 md:border-r {divider_color}">
             
             <div class="relative h-72 md:h-[55%] group overflow-hidden {st['img_bg']} flex items-center justify-center p-6">
-                <img src="{final_image_src}" class="w-full h-full object-contain relative z-10 drop-shadow-xl transition-transform duration-700 group-hover:scale-105">
+                <img src="{_safe_src(final_image_src)}" class="w-full h-full object-contain relative z-10 drop-shadow-xl transition-transform duration-700 group-hover:scale-105">
                 
                 <div class="absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-black/80 to-transparent z-20 pointer-events-none"></div>
                 
@@ -146,10 +161,10 @@ def generate_gift_card(product_name, price, evaluation, thank_you_json, return_g
                     <div class="inline-block px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest mb-2 {st['tag_bg']} backdrop-blur-md shadow-lg">
                         AI Gift Analysis
                     </div>
-                    <h1 class="text-3xl md:text-4xl font-black text-white leading-tight serif mb-1 drop-shadow-md truncate">{product_name}</h1>
+                    <h1 class="text-3xl md:text-4xl font-black text-white leading-tight serif mb-1 drop-shadow-md truncate">{_esc(product_name)}</h1>
                     <div class="flex items-baseline gap-2 text-white/90">
                         <span class="text-sm font-light opacity-80">当前估值</span>
-                        <span class="text-3xl font-bold tracking-tight">{price}</span>
+                        <span class="text-3xl font-bold tracking-tight">{_esc(price)}</span>
                     </div>
                 </div>
             </div>
@@ -163,7 +178,7 @@ def generate_gift_card(product_name, price, evaluation, thank_you_json, return_g
                 </h3>
                 
                 <div class="{st['text_main']} text-base md:text-lg leading-relaxed italic font-medium relative z-10 overflow-y-auto custom-scroll flex-1 pr-2">
-                    {evaluation}
+                    {_esc(evaluation)}
                 </div>
                 
                 <div class="mt-4 pt-4 border-t {divider_color} flex items-center gap-3 shrink-0">
@@ -214,7 +229,8 @@ def generate_gift_card(product_name, price, evaluation, thank_you_json, return_g
     </div>
 
     <script>
-        function copyText(element, text) {{
+        function copyText(element) {{
+            const text = element.getAttribute('data-copy') || '';
             navigator.clipboard.writeText(text).then(() => {{
                 const feedback = element.querySelector('.copy-feedback');
                 feedback.classList.remove('opacity-0');

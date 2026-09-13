@@ -455,6 +455,57 @@ window.__META__ = {"id": "demo", "title": "StudyBuddy 题库示例", "subtitle":
 <script>
 'use strict';
 
+function h(tag, attrs) {
+  const el = document.createElement(tag);
+  const children = Array.prototype.slice.call(arguments, 2);
+  if (attrs) {
+    Object.keys(attrs).forEach(function (k) {
+      const v = attrs[k];
+      if (v == null || v === false) return;
+      if (k === 'className') el.className = v;
+      else if (k === 'dataset') Object.keys(v).forEach(function (d) { el.dataset[d] = v[d]; });
+      else if (k.slice(0, 2) === 'on' && typeof v === 'function') el[k] = v;
+      else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
+      else if (k === 'style') el.style.cssText = v;
+      else if (k === 'disabled') el.disabled = !!v;
+      else if (k === 'id') el.id = v;
+      else if (k === 'title') el.title = v;
+      else if (k === 'placeholder') el.placeholder = v;
+      else if (k === 'rows') el.rows = v;
+      else el.setAttribute(k, v);
+    });
+  }
+  children.flat().forEach(function (c) {
+    if (c == null || c === false) return;
+    el.appendChild(typeof c === 'string' || typeof c === 'number'
+      ? document.createTextNode(String(c))
+      : c);
+  });
+  return el;
+}
+
+function appendMD(parent, s) {
+  if (s == null || s === '') return parent;
+  const str = String(s);
+  const re = /(\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`|____+|\n)/g;
+  let last = 0, m;
+  function addText(t) { if (t) parent.appendChild(document.createTextNode(t)); }
+  while ((m = re.exec(str))) {
+    addText(str.slice(last, m.index));
+    if (m[2] != null) parent.appendChild(h('strong', null, m[2]));
+    else if (m[3] != null) parent.appendChild(h('em', null, m[3]));
+    else if (m[4] != null) parent.appendChild(h('code', null, m[4]));
+    else if (m[0].charAt(0) === '_') {
+      parent.appendChild(h('span', {
+        style: 'display:inline-block;min-width:80px;border-bottom:2px solid currentColor;margin:0 4px;opacity:.5;'
+      }, '\u00a0'));
+    } else parent.appendChild(document.createElement('br'));
+    last = m.index + m[0].length;
+  }
+  addText(str.slice(last));
+  return parent;
+}
+
 /* ============================================
  * Quiz Engine - K12 StudyBuddy 4.0
  * 受 v15 启发，针对 K12 多学科多题型优化
@@ -496,7 +547,9 @@ function init() {
 
   QS = (window.__QUIZ_DATA__ || []).map((q, i) => Object.assign({ id: i + 1 }, q));
   if (QS.length === 0) {
-    document.getElementById('leftScroll').innerHTML = '<div style="padding:20px;color:#a8adbd;font-size:13px;text-align:center;">题库为空，请先导入题目</div>';
+    document.getElementById('leftScroll').replaceChildren(
+      h('div', { style: 'padding:20px;color:#a8adbd;font-size:13px;text-align:center;' }, '题库为空，请先导入题目')
+    );
     return;
   }
 
@@ -558,7 +611,8 @@ function buildCatChips() {
     const chip = document.createElement('span');
     chip.className = 'cat-chip' + (activeCats.has(c) ? ' active' : '');
     chip.dataset.cat = c;
-    chip.innerHTML = `${escapeHtml(c)}<span class="chip-count">${counts[c]}</span>`;
+    chip.appendChild(document.createTextNode(c));
+    chip.appendChild(h('span', { className: 'chip-count' }, String(counts[c])));
     chip.onclick = () => toggleCat(c, chip);
     wrap.appendChild(chip);
   });
@@ -591,21 +645,30 @@ function buildSidebar() {
   });
 
   const container = document.getElementById('leftScroll');
-  container.innerHTML = '';
+  container.replaceChildren();
   Object.keys(groups).forEach(cat => {
     const subs = groups[cat];
     const total = Object.values(subs).reduce((s, arr) => s + arr.length, 0);
-    let html = `<div class="cat-group"><div class="cat-top">📂 ${escapeHtml(cat)} <span class="cat-count">${total}题</span></div>`;
+    const group = h('div', { className: 'cat-group' });
+    const top = h('div', { className: 'cat-top' }, '📂 ' + cat + ' ');
+    top.appendChild(h('span', { className: 'cat-count' }, total + '题'));
+    group.appendChild(top);
     Object.keys(subs).forEach(sub => {
-      html += `<div class="cat-sub"><div class="cat-sub-name">${escapeHtml(sub)}</div><div class="cat-nums">`;
+      const nums = h('div', { className: 'cat-nums' });
       subs[sub].forEach(q => {
         const st = states[q.id] || 'unstudied';
-        html += `<span class="qnum ${st}" data-id="${q.id}" onclick="selectQ(${q.id})">${q.id}</span>`;
+        nums.appendChild(h('span', {
+          className: 'qnum ' + st,
+          dataset: { id: String(q.id) },
+          onclick: function () { selectQ(q.id); }
+        }, String(q.id)));
       });
-      html += `</div></div>`;
+      group.appendChild(h('div', { className: 'cat-sub' },
+        h('div', { className: 'cat-sub-name' }, sub),
+        nums
+      ));
     });
-    html += `</div>`;
-    container.insertAdjacentHTML('beforeend', html);
+    container.appendChild(group);
   });
 }
 
@@ -677,62 +740,83 @@ function renderQuestion(q) {
   const kp = q.knowledge_point || q.knowledge || '';
   const st = states[q.id] || 'unstudied';
 
-  let html = `<div class="q-card">
-    <div class="q-meta">
-      <span class="q-id">Q${q.id}</span>
-      <span class="q-tag ${typeInfo.cls}">${typeInfo.txt}</span>
-      ${lvl ? `<span class="q-tag level">${lvl}</span>` : ''}
-      <button class="q-state-btn ${st}" id="qStateBtn" onclick="cycleState()" title="点击手动切换：未做 → 已掌握 → 错题">${STATE_LABELS[st]} <span style="opacity:.5;font-weight:400;">▾</span></button>
-      ${kp ? `<span class="q-knowledge" title="${escapeHtml(kp)}">🏷️ ${escapeHtml(kp)}</span>` : ''}
-    </div>
-    <div class="q-text">${renderMD(q.prompt || q.question)}</div>`;
+  const meta = h('div', { className: 'q-meta' },
+    h('span', { className: 'q-id' }, 'Q' + q.id),
+    h('span', { className: 'q-tag ' + typeInfo.cls }, typeInfo.txt)
+  );
+  if (lvl) meta.appendChild(h('span', { className: 'q-tag level' }, lvl));
+  const stateBtn = h('button', {
+    className: 'q-state-btn ' + st,
+    id: 'qStateBtn',
+    onclick: function () { cycleState(); },
+    title: '点击手动切换：未做 → 已掌握 → 错题'
+  }, STATE_LABELS[st] + ' ');
+  stateBtn.appendChild(h('span', { style: 'opacity:.5;font-weight:400;' }, '▾'));
+  meta.appendChild(stateBtn);
+  if (kp) meta.appendChild(h('span', { className: 'q-knowledge', title: kp }, '🏷️ ' + kp));
+
+  const qText = h('div', { className: 'q-text' });
+  appendMD(qText, q.prompt || q.question);
+
+  const card = h('div', { className: 'q-card' }, meta, qText);
 
   if (q.type === 'single_choice') {
-    html += `<div class="opts" id="qOpts">`;
+    const opts = h('div', { className: 'opts', id: 'qOpts' });
     (q.options || []).forEach((opt, i) => {
       const m = opt.match(/^([A-Z])[\.\、]\s*(.+)/);
       const letter = m ? m[1] : String.fromCharCode(65 + i);
       const text = m ? m[2] : opt;
-      html += `<div class="opt" data-key="${letter}" onclick="chooseOpt(this,'${letter}',${q.id})">
-        <span class="letter">${letter}</span><span class="text">${renderMD(text)}</span>
-      </div>`;
+      const textEl = h('span', { className: 'text' });
+      appendMD(textEl, text);
+      opts.appendChild(h('div', {
+        className: 'opt',
+        dataset: { key: letter },
+        onclick: function () { chooseOpt(this, letter, q.id); }
+      }, h('span', { className: 'letter' }, letter), textEl));
     });
-    html += `</div>`;
+    card.appendChild(opts);
   } else if (q.type === 'true_false') {
-    html += `<div class="opts" id="qOpts">
-      <div class="opt" data-key="True" onclick="chooseOpt(this,'True',${q.id})"><span class="letter">✓</span><span class="text">正确</span></div>
-      <div class="opt" data-key="False" onclick="chooseOpt(this,'False',${q.id})"><span class="letter">✗</span><span class="text">错误</span></div>
-    </div>`;
+    card.appendChild(h('div', { className: 'opts', id: 'qOpts' },
+      h('div', {
+        className: 'opt',
+        dataset: { key: 'True' },
+        onclick: function () { chooseOpt(this, 'True', q.id); }
+      }, h('span', { className: 'letter' }, '✓'), h('span', { className: 'text' }, '正确')),
+      h('div', {
+        className: 'opt',
+        dataset: { key: 'False' },
+        onclick: function () { chooseOpt(this, 'False', q.id); }
+      }, h('span', { className: 'letter' }, '✗'), h('span', { className: 'text' }, '错误'))
+    ));
   } else if (q.type === 'fill_blank') {
-    html += `<input class="q-input short" id="qInput" placeholder="在这里输入你的答案..." />`;
+    card.appendChild(h('input', { className: 'q-input short', id: 'qInput', placeholder: '在这里输入你的答案...' }));
   } else if (q.type === 'short_answer') {
-    html += `<textarea class="q-input long" id="qInput" placeholder="在这里写下你的回答..."></textarea>`;
+    card.appendChild(h('textarea', { className: 'q-input long', id: 'qInput', placeholder: '在这里写下你的回答...' }));
   }
 
   if (q.type === 'fill_blank' || q.type === 'short_answer') {
-    html += `<div class="q-actions">
-      <button class="btn-submit" id="btnSubmit" onclick="submitTextAnswer(${q.id})">提交 (Enter)</button>
-      <button class="btn-reveal" onclick="revealAnswer(${q.id})">查看答案</button>
-      <button class="btn-reset" onclick="resetQ(${q.id})">↻ 重做</button>
-    </div>`;
+    card.appendChild(h('div', { className: 'q-actions' },
+      h('button', { className: 'btn-submit', id: 'btnSubmit', onclick: function () { submitTextAnswer(q.id); } }, '提交 (Enter)'),
+      h('button', { className: 'btn-reveal', onclick: function () { revealAnswer(q.id); } }, '查看答案'),
+      h('button', { className: 'btn-reset', onclick: function () { resetQ(q.id); } }, '↻ 重做')
+    ));
   } else {
-    html += `<div class="q-actions">
-      <button class="btn-submit" id="btnSubmit" onclick="submitChoice(${q.id})" disabled>提交 (Enter)</button>
-      <button class="btn-reveal" onclick="revealAnswer(${q.id})">查看答案</button>
-      <button class="btn-reset" onclick="resetQ(${q.id})">↻ 重做</button>
-    </div>`;
+    card.appendChild(h('div', { className: 'q-actions' },
+      h('button', { className: 'btn-submit', id: 'btnSubmit', disabled: true, onclick: function () { submitChoice(q.id); } }, '提交 (Enter)'),
+      h('button', { className: 'btn-reveal', onclick: function () { revealAnswer(q.id); } }, '查看答案'),
+      h('button', { className: 'btn-reset', onclick: function () { resetQ(q.id); } }, '↻ 重做')
+    ));
   }
 
-  html += `<div class="auto-state-hint" id="autoHint"></div>
-    <div class="analysis" id="analysis">
-      <div class="ans-line" id="ansLine"></div>
-      <div class="ans-text" id="ansText"></div>
-      <div class="tip" id="tipBox"></div>
-      <div class="kw" id="kwDetail"></div>
-    </div>
-  </div>`;
+  card.appendChild(h('div', { className: 'auto-state-hint', id: 'autoHint' }));
+  card.appendChild(h('div', { className: 'analysis', id: 'analysis' },
+    h('div', { className: 'ans-line', id: 'ansLine' }),
+    h('div', { className: 'ans-text', id: 'ansText' }),
+    h('div', { className: 'tip', id: 'tipBox' }),
+    h('div', { className: 'kw', id: 'kwDetail' })
+  ));
 
-  document.getElementById('rightInner').innerHTML = html;
+  document.getElementById('rightInner').replaceChildren(card);
 
   // 恢复已答状态
   if (answered[q.id] !== undefined) {
@@ -888,25 +972,48 @@ function showAnalysis(q, userAns, correct) {
   const kw = document.getElementById('kwDetail');
 
   an.classList.remove('correct', 'wrong');
-  let lineHtml = '';
+  line.replaceChildren();
   if (q.type === 'short_answer') {
-    lineHtml = `📝 参考答案：${renderMD(String(q.answer || ''))}`;
+    line.appendChild(document.createTextNode('📝 参考答案：'));
+    appendMD(line, String(q.answer || ''));
   } else if (correct) {
     an.classList.add('correct');
-    lineHtml = `🎉 答对啦！正确答案：<strong>${renderMD(String(q.answer || ''))}</strong>`;
+    line.appendChild(document.createTextNode('🎉 答对啦！正确答案：'));
+    const strong = h('strong');
+    appendMD(strong, String(q.answer || ''));
+    line.appendChild(strong);
   } else if (correct === false) {
     an.classList.add('wrong');
-    lineHtml = `❌ 你的答案是 <span style="text-decoration:line-through;opacity:.7;">${escapeHtml(userAns)}</span>，正确答案是 <strong>${renderMD(String(q.answer || ''))}</strong>`;
+    line.appendChild(document.createTextNode('❌ 你的答案是 '));
+    line.appendChild(h('span', { style: 'text-decoration:line-through;opacity:.7;' }, String(userAns ?? '')));
+    line.appendChild(document.createTextNode('，正确答案是 '));
+    const strong = h('strong');
+    appendMD(strong, String(q.answer || ''));
+    line.appendChild(strong);
   } else {
-    lineHtml = `📌 正确答案：<strong>${renderMD(String(q.answer || ''))}</strong>`;
+    line.appendChild(document.createTextNode('📌 正确答案：'));
+    const strong = h('strong');
+    appendMD(strong, String(q.answer || ''));
+    line.appendChild(strong);
   }
-  line.innerHTML = lineHtml;
 
-  txt.innerHTML = q.explanation ? '<strong>💡 解析：</strong><br>' + renderMD(q.explanation) : '';
-  if (q.memory_tip) { tip.innerHTML = '🧠 ' + renderMD(q.memory_tip); tip.classList.add('visible'); }
-  else { tip.classList.remove('visible'); tip.innerHTML = ''; }
+  txt.replaceChildren();
+  if (q.explanation) {
+    txt.appendChild(h('strong', null, '💡 解析：'));
+    txt.appendChild(document.createElement('br'));
+    appendMD(txt, q.explanation);
+  }
+  tip.replaceChildren();
+  if (q.memory_tip) {
+    tip.appendChild(document.createTextNode('🧠 '));
+    appendMD(tip, q.memory_tip);
+    tip.classList.add('visible');
+  } else {
+    tip.classList.remove('visible');
+  }
   const knp = q.knowledge_point || q.knowledge;
-  kw.innerHTML = knp ? '📚 知识点：' + escapeHtml(knp) : '';
+  kw.replaceChildren();
+  if (knp) kw.appendChild(document.createTextNode('📚 知识点：' + knp));
 
   an.classList.add('visible');
 }
@@ -1043,7 +1150,12 @@ window.doReset = function () {
   applyStatesToDOM();
   applyFilters();
   hideResetModal();
-  document.getElementById('rightInner').innerHTML = '<div class="empty-state"><div class="icon">✨</div><div>已重置，重新开始！</div></div>';
+  document.getElementById('rightInner').replaceChildren(
+    h('div', { className: 'empty-state' },
+      h('div', { className: 'icon' }, '✨'),
+      h('div', null, '已重置，重新开始！')
+    )
+  );
   document.getElementById('navBar').style.display = 'none';
   currentId = null;
 };
@@ -1105,35 +1217,62 @@ window.startExam = function () {
   examAnswers = {};
   examStartTime = Date.now();
 
-  let html = '';
+  const examBody = document.getElementById('examBody');
+  examBody.replaceChildren();
   examQuestions.forEach((q, idx) => {
     const typeInfo = TYPE_LABELS[q.type] || { txt: '', cls: '' };
-    html += `<div class="exam-q-card" id="eq-${q.id}">
-      <div class="exam-q-num">第 ${idx + 1} 题 · ${typeInfo.txt}</div>
-      <div class="exam-q-text">${renderMD(q.prompt || q.question)}</div>`;
+    const qText = h('div', { className: 'exam-q-text' });
+    appendMD(qText, q.prompt || q.question);
+    const card = h('div', { className: 'exam-q-card', id: 'eq-' + q.id },
+      h('div', { className: 'exam-q-num' }, '第 ' + (idx + 1) + ' 题 · ' + typeInfo.txt),
+      qText
+    );
     if (q.type === 'single_choice') {
-      html += `<div class="exam-opts">`;
+      const opts = h('div', { className: 'exam-opts' });
       (q.options || []).forEach((opt, i) => {
         const m = opt.match(/^([A-Z])[\.\、]\s*(.+)/);
         const letter = m ? m[1] : String.fromCharCode(65 + i);
         const text = m ? m[2] : opt;
-        html += `<div class="exam-opt" data-qid="${q.id}" data-key="${letter}" onclick="examChoose(this,${q.id},'${letter}')">
-          <span class="letter">${letter}</span><span>${renderMD(text)}</span>
-        </div>`;
+        const label = document.createElement('span');
+        appendMD(label, text);
+        opts.appendChild(h('div', {
+          className: 'exam-opt',
+          dataset: { qid: String(q.id), key: letter },
+          onclick: function () { examChoose(this, q.id, letter); }
+        }, h('span', { className: 'letter' }, letter), label));
       });
-      html += `</div>`;
+      card.appendChild(opts);
     } else if (q.type === 'true_false') {
-      html += `<div class="exam-opts">
-        <div class="exam-opt" data-qid="${q.id}" data-key="True" onclick="examChoose(this,${q.id},'True')"><span class="letter">✓</span><span>正确</span></div>
-        <div class="exam-opt" data-qid="${q.id}" data-key="False" onclick="examChoose(this,${q.id},'False')"><span class="letter">✗</span><span>错误</span></div>
-      </div>`;
+      card.appendChild(h('div', { className: 'exam-opts' },
+        h('div', {
+          className: 'exam-opt',
+          dataset: { qid: String(q.id), key: 'True' },
+          onclick: function () { examChoose(this, q.id, 'True'); }
+        }, h('span', { className: 'letter' }, '✓'), document.createTextNode('正确')),
+        h('div', {
+          className: 'exam-opt',
+          dataset: { qid: String(q.id), key: 'False' },
+          onclick: function () { examChoose(this, q.id, 'False'); }
+        }, h('span', { className: 'letter' }, '✗'), document.createTextNode('错误'))
+      ));
+    } else if (q.type === 'short_answer') {
+      card.appendChild(h('textarea', {
+        className: 'exam-input',
+        rows: 3,
+        dataset: { qid: String(q.id) },
+        placeholder: '输入答案...',
+        oninput: function () { examTextInput(q.id, this.value); }
+      }));
     } else {
-      const tag = q.type === 'short_answer' ? 'textarea class="exam-input" rows="3"' : 'input class="exam-input"';
-      html += `<${tag} data-qid="${q.id}" oninput="examTextInput(${q.id},this.value)" placeholder="输入答案..."></${q.type === 'short_answer' ? 'textarea' : 'input'}>`;
+      card.appendChild(h('input', {
+        className: 'exam-input',
+        dataset: { qid: String(q.id) },
+        placeholder: '输入答案...',
+        oninput: function () { examTextInput(q.id, this.value); }
+      }));
     }
-    html += `</div>`;
+    examBody.appendChild(card);
   });
-  document.getElementById('examBody').innerHTML = html;
   updateExamProgress();
   document.getElementById('examOverlay').classList.add('visible');
   document.getElementById('examSubmitBtn').disabled = false;
@@ -1230,40 +1369,62 @@ function showResults() {
   document.getElementById('resultsDetail').textContent =
     `${examQuestions.length} 题 · 答对 ${correct}/${gradable}${gradable < examQuestions.length ? ` · ${examQuestions.length - gradable} 题需自评` : ''}`;
 
-  let html = '';
+  const resultsBody = document.getElementById('resultsBody');
+  resultsBody.replaceChildren();
   items.forEach(it => {
     const { q, userAns, isCorrect, idx } = it;
     const cls = isCorrect === true ? 'is-correct' : isCorrect === false ? 'is-wrong' : '';
     const badge = isCorrect === true
-      ? '<span class="result-badge correct">✓ 正确</span>'
+      ? h('span', { className: 'result-badge correct' }, '✓ 正确')
       : isCorrect === false
-      ? '<span class="result-badge wrong">✗ 错误</span>'
-      : '<span class="result-badge" style="background:#fff4e0;color:#e9a82c;">📝 待自评</span>';
+      ? h('span', { className: 'result-badge wrong' }, '✗ 错误')
+      : h('span', { className: 'result-badge', style: 'background:#fff4e0;color:#e9a82c;' }, '📝 待自评');
 
-    let ansHtml = '';
+    const item = h('div', { className: 'result-item ' + cls },
+      h('div', { className: 'result-top' },
+        h('span', { className: 'result-qid' }, '第' + (idx + 1) + '题 · Q' + q.id),
+        badge
+      )
+    );
+    const qText = h('div', { className: 'result-text' });
+    appendMD(qText, q.prompt || q.question);
+    item.appendChild(qText);
+
     if (q.type === 'single_choice' || q.type === 'true_false' || q.type === 'fill_blank') {
+      const ans = h('div', { className: 'result-answers' });
       if (isCorrect) {
-        ansHtml = `<div class="result-answers">✓ 你答：<span class="correct-ans">${escapeHtml(String(userAns || ''))}</span></div>`;
+        ans.appendChild(document.createTextNode('✓ 你答：'));
+        ans.appendChild(h('span', { className: 'correct-ans' }, String(userAns || '')));
       } else {
-        ansHtml = `<div class="result-answers">你答：<span class="wrong-ans">${escapeHtml(String(userAns || '（未作答）'))}</span> · 正确答案：<span class="correct-ans">${renderMD(String(q.answer || ''))}</span></div>`;
+        ans.appendChild(document.createTextNode('你答：'));
+        ans.appendChild(h('span', { className: 'wrong-ans' }, String(userAns || '（未作答）')));
+        ans.appendChild(document.createTextNode(' · 正确答案：'));
+        const correctAns = h('span', { className: 'correct-ans' });
+        appendMD(correctAns, String(q.answer || ''));
+        ans.appendChild(correctAns);
       }
+      item.appendChild(ans);
     } else {
-      ansHtml = `<div class="result-answers">你答：${escapeHtml(String(userAns || '（未作答）'))}</div>
-        <div class="result-answers">参考：<span class="correct-ans">${renderMD(String(q.answer || ''))}</span></div>`;
+      item.appendChild(h('div', { className: 'result-answers' }, '你答：' + String(userAns || '（未作答）')));
+      const ref = h('div', { className: 'result-answers' }, '参考：');
+      const correctAns = h('span', { className: 'correct-ans' });
+      appendMD(correctAns, String(q.answer || ''));
+      ref.appendChild(correctAns);
+      item.appendChild(ref);
     }
 
-    html += `<div class="result-item ${cls}">
-      <div class="result-top">
-        <span class="result-qid">第${idx + 1}题 · Q${q.id}</span>
-        ${badge}
-      </div>
-      <div class="result-text">${renderMD(q.prompt || q.question)}</div>
-      ${ansHtml}
-      ${q.explanation ? `<div class="result-analysis">💡 ${renderMD(q.explanation)}</div>` : ''}
-      ${q.memory_tip ? `<div class="result-tip">🧠 ${renderMD(q.memory_tip)}</div>` : ''}
-    </div>`;
+    if (q.explanation) {
+      const analysis = h('div', { className: 'result-analysis' }, '💡 ');
+      appendMD(analysis, q.explanation);
+      item.appendChild(analysis);
+    }
+    if (q.memory_tip) {
+      const tip = h('div', { className: 'result-tip' }, '🧠 ');
+      appendMD(tip, q.memory_tip);
+      item.appendChild(tip);
+    }
+    resultsBody.appendChild(item);
   });
-  document.getElementById('resultsBody').innerHTML = html;
   document.getElementById('examResults').classList.add('visible');
 }
 

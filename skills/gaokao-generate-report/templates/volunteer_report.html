@@ -1063,12 +1063,35 @@
   <script>
     window.REC_MODALS = {{ rec_modals_json | safe }};
 
+    var REC_MODAL_TAGS = { H4: 1, H5: 1, UL: 1, OL: 1, LI: 1, P: 1, STRONG: 1, EM: 1, BR: 1, SPAN: 1, DIV: 1, B: 1 };
+
+    function setSafeRichText(target, html) {
+      target.replaceChildren();
+      if (!html) return;
+      var doc = new DOMParser().parseFromString(String(html), 'text/html');
+      function copy(src, dest) {
+        src.childNodes.forEach(function (node) {
+          if (node.nodeType === 3) {
+            dest.appendChild(document.createTextNode(node.nodeValue));
+          } else if (node.nodeType === 1 && REC_MODAL_TAGS[node.tagName]) {
+            var el = document.createElement(node.tagName);
+            if (node.getAttribute('class')) el.className = node.getAttribute('class');
+            copy(node, el);
+            dest.appendChild(el);
+          } else if (node.nodeType === 1) {
+            copy(node, dest);
+          }
+        });
+      }
+      copy(doc.body, target);
+    }
+
     function openRecModalById(recId) {
       var data = window.REC_MODALS && window.REC_MODALS[recId];
       if (!data) return;
       var modal = document.getElementById('recModal');
-      document.getElementById('recModalTitle').innerText = data.title || '推荐详情';
-      document.getElementById('recModalBody').innerHTML = data.body || '';
+      document.getElementById('recModalTitle').textContent = data.title || '推荐详情';
+      setSafeRichText(document.getElementById('recModalBody'), data.body || '');
       modal.showModal();
     }
 
