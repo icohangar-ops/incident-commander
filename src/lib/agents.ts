@@ -1,5 +1,8 @@
 import { query, rowToAction, rowToIncident } from './cockroachdb';
-import { invokeClaude, invokeClaudeJSON, type BedrockMessage } from './bedrock';
+import { invokeClaude, type BedrockMessage } from './bedrock';
+import { runDegradationLadder } from './degradation';
+import { buildDegradedScaffold, type ScaffoldableAgentType } from './scaffold';
+import { composeConfidence } from './confidence';
 import { uploadArtifact } from './s3';
 import type { Incident, AgentAction, RAGResult } from './types';
 import { getAuditLedger } from './audit/ledger';
@@ -29,6 +32,49 @@ function recordDecision(input: {
 // Non-blocking S3 upload (logs error but doesn't fail the agent)
 async function safeUpload(key: string, content: string, contentType?: string) {
   try { await uploadArtifact(key, content, contentType); } catch (e) { console.warn('S3 upload skipped:', (e as Error).message); }
+}
+
+// Row 18: run an agent's LLM step through the degradation ladder. Primary
+// tier is the Bedrock model; the degraded tier is a deterministic scaffold
+// built from the actual incident fields (visibly marked, no fabricated
+// analysis). The result always carries which tier served it.
+interface DegradationInfo {
+  level: string;
+  tier_used: string | null;
+}
+
+async function invokeWithDegradation(
+  agentType: ScaffoldableAgentType,
+  incidentCtx: { title: string; description: string; source: string },
+  systemPrompt: string,
+  messages: BedrockMessage[],
+  maxTokens: number = 2000
+): Promise<{ json: Record<string, unknown>; degradation: DegradationInfo }> {
+  const ladder = await runDegradationLadder([
+    {
+      name: 'primary',
+      run: () => invokeClaude(
+        `${systemPrompt}\n\nYou MUST respond with valid JSON only. No markdown, no explanation.`,
+        messages,
+        maxTokens
+      ),
+    },
+    {
+      name: 'degraded-scaffold',
+      run: async () => buildDegradedScaffold(agentType, incidentCtx),
+    },
+  ]);
+  if (ladder.text === null) {
+    throw new Error(
+      `${agentType}: all degradation tiers failed (${ladder.attempts.map(a => `${a.tier}: ${a.reason ?? 'ok'}`).join('; ')})`
+    );
+  }
+  const jsonMatch = ladder.text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error(`No JSON found in ${agentType} ${ladder.level} response`);
+  return {
+    json: JSON.parse(jsonMatch[0]) as Record<string, unknown>,
+    degradation: { level: ladder.level, tier_used: ladder.tierUsed },
+  };
 }
 
 // Generate a simple deterministic embedding for text (normalized)
@@ -174,23 +220,62 @@ You have access to historical incident data via RAG. Use it to inform your triag
     { role: 'user', content: `Incident Report:\nTitle: ${incident.title}\nDescription: ${incident.description}\nSource: ${incident.source}${context}` }
   ];
 
-  const triageResult = await invokeClaudeJSON<TriageResult>(systemPrompt, messages);
+  const { json: triageJson, degradation } = await invokeWithDegradation(
+    'triage',
+    { title: incident.title, description: incident.description, source: incident.source },
+    systemPrompt,
+    messages
+  );
+  const triageResult = triageJson as unknown as TriageResult;
 
   // 5. Update incident
-  const newSeverity = (['critical', 'high', 'medium', 'low'].includes(triageResult.severity?.toLowerCase())
-    ? triageResult.severity.toLowerCase()
+  const newSeverity = (['critical', 'high', 'medium', 'low'].includes(triageResult.severity?.toLowerCase() || '')
+    ? triageResult.severity!.toLowerCase()
     : incident.severity) as Incident['severity'];
+
+  // Row 20: evidence-carrying confidence — named capped factors with
+  // evidence strings, not a bare number. Composed into the agent action,
+  // the incident notes, and the signed ledger entry.
+  const topRag = ragResults.find(r => typeof r.similarity === 'number') ?? null;
+  const confidence = composeConfidence([
+    {
+      name: 'model_tier',
+      score: degradation.level === 'primary' ? 40 : 12,
+      cap: 40,
+      evidence: [`tier=${degradation.tier_used ?? 'none'}`],
+    },
+    {
+      name: 'rag_support',
+      score: topRag ? Math.round(topRag.similarity * 25) : 0,
+      cap: 25,
+      evidence: topRag
+        ? [`top_similarity=${topRag.similarity.toFixed(3)} source=${topRag.source_type}:${topRag.title ?? topRag.source_id}`]
+        : ['no similar past incidents found'],
+    },
+    {
+      name: 'input_completeness',
+      score: incident.description.trim().length >= 40 ? 20 : incident.description.trim().length > 0 ? 8 : 0,
+      cap: 20,
+      evidence: [`description_chars=${incident.description.trim().length}`, `source=${incident.source}`],
+    },
+    {
+      name: 'severity_classified',
+      score: triageJson.severity !== null && triageJson.severity !== undefined ? 15 : 0,
+      cap: 15,
+      evidence: [`severity=${triageJson.severity ?? 'not classified (degraded scaffold)'}`],
+    },
+  ]);
 
   await query(
     `UPDATE incidents SET severity = $1, status = 'investigating', agent_notes = $2, updated_at = now() WHERE id = $3`,
-    [newSeverity, `Triage: ${triageResult.initial_assessment}\nClassification: ${triageResult.classification}\nRecommended: ${triageResult.recommended_actions.join(', ')}`, incidentId]
+    [newSeverity, `Triage: ${triageResult.initial_assessment}\nClassification: ${triageResult.classification}\nRecommended: ${triageResult.recommended_actions.join(', ')}\nConfidence: ${confidence.score} (${confidence.band}, ${degradation.level})`, incidentId]
   );
 
   // 6. Log agent action
   const duration = Date.now() - start;
   const actionResult = await query(
     `INSERT INTO agent_actions (incident_id, agent_type, action, input_data, output_data, status, duration_ms) VALUES ($1, 'triage', 'triage_incident', $2, $3, 'completed', $4) RETURNING *`,
-    [incidentId, JSON.stringify({ title: incident.title, description: incident.description }), JSON.stringify(triageResult), duration]
+    [incidentId, JSON.stringify({ title: incident.title, description: incident.description }), JSON.stringify({ ...triageResult, degradation, confidence: { score: confidence.score, band: confidence.band, factors: confidence.factors } }), duration]
   );
 
   // 6b. Sign the decision into the tamper-evident audit ledger
@@ -199,7 +284,8 @@ You have access to historical incident data via RAG. Use it to inform your triag
     actor: 'triage-agent',
     inputs: { incident_id: incidentId, title: incident.title, description: incident.description, source: incident.source },
     sources: ragResults.map(r => ({ source_type: r.source_type, source_id: r.source_id, title: r.title, similarity: r.similarity })),
-    rationale: `severity=${newSeverity}; classification=${triageResult.classification}; ${triageResult.initial_assessment}`,
+    confidence: confidence.score,
+    rationale: `severity=${newSeverity}; classification=${triageResult.classification}; confidence=${confidence.score} (${confidence.band}); degradation=${degradation.level}/${degradation.tier_used ?? 'none'}; factors=${confidence.factors.map(f => `${f.name}:${Math.min(f.score, f.cap)}/${f.cap}`).join(',')}; ${triageResult.initial_assessment}`,
   });
 
   // 7. Upload to S3
@@ -253,7 +339,13 @@ Previous agent actions provide context. RAG results contain similar past inciden
     { role: 'user', content: `Incident: ${incident.title}\nSeverity: ${incident.severity}\nDescription: ${incident.description}\nAgent notes: ${incident.agent_notes || 'None'}\n\nPrevious actions:\n${prevContext}\n\nKnowledge base (RAG):\n${ragContext || 'No similar results found.'}` }
   ];
 
-  const investigationResult = await invokeClaudeJSON<InvestigationResult>(systemPrompt, messages);
+  const { json: investigationJson, degradation } = await invokeWithDegradation(
+    'investigation',
+    { title: incident.title, description: incident.description, source: incident.source },
+    systemPrompt,
+    messages
+  );
+  const investigationResult = investigationJson as unknown as InvestigationResult;
 
   const findings = investigationResult.findings || [];
   const steps = investigationResult.investigation_steps || [];
@@ -268,7 +360,7 @@ Previous agent actions provide context. RAG results contain similar past inciden
   const duration = Date.now() - start;
   const actionResult = await query(
     `INSERT INTO agent_actions (incident_id, agent_type, action, input_data, output_data, status, duration_ms) VALUES ($1, 'investigation', 'investigate_incident', $2, $3, 'completed', $4) RETURNING *`,
-    [incidentId, JSON.stringify({ incident_id: incidentId, rag_count: ragResults.length }), JSON.stringify(investigationResult), duration]
+    [incidentId, JSON.stringify({ incident_id: incidentId, rag_count: ragResults.length }), JSON.stringify({ ...investigationResult, degradation }), duration]
   );
 
   // Sign the decision into the tamper-evident audit ledger
@@ -280,7 +372,7 @@ Previous agent actions provide context. RAG results contain similar past inciden
       prev_actions: prevActions.map(a => ({ agent_type: a.agent_type, action: a.action })),
       rag: ragResults.map(r => ({ source_type: r.source_type, source_id: r.source_id, title: r.title, similarity: r.similarity })),
     },
-    rationale: `root_cause_hypothesis=${investigationResult.root_cause_hypothesis || 'Unknown'}; findings=${findings.join('; ')}`,
+    rationale: `degradation=${degradation.level}/${degradation.tier_used ?? 'none'}; root_cause_hypothesis=${investigationResult.root_cause_hypothesis || 'Unknown'}; findings=${findings.join('; ')}`,
   });
 
   await safeUpload(
@@ -373,7 +465,13 @@ Provide the resolution plan and a summary of the resolution.`;
     { role: 'user', content: `Incident: ${incident.title}\nSeverity: ${incident.severity}\nDescription: ${incident.description}\n\nAgent history:\n${prevContext}` }
   ];
 
-  const resolutionResult = await invokeClaudeJSON<ResolutionResult>(systemPrompt, messages);
+  const { json: resolutionJson, degradation } = await invokeWithDegradation(
+    'resolution',
+    { title: incident.title, description: incident.description, source: incident.source },
+    systemPrompt,
+    messages
+  );
+  const resolutionResult = resolutionJson as unknown as ResolutionResult;
 
   const plan = (resolutionResult.resolution_plan ?? [])
     .map(s => String(s))
@@ -453,7 +551,7 @@ Provide the resolution plan and a summary of the resolution.`;
   const duration = Date.now() - start;
   const actionResult = await query(
     `INSERT INTO agent_actions (incident_id, agent_type, action, input_data, output_data, status, duration_ms) VALUES ($1, 'resolution', 'resolve_incident', $2, $3, 'completed', $4) RETURNING *`,
-    [incidentId, JSON.stringify({ incident_id: incidentId, chp_decision_id: decisionCase.decision_id }), JSON.stringify(resolutionResult), duration]
+    [incidentId, JSON.stringify({ incident_id: incidentId, chp_decision_id: decisionCase.decision_id }), JSON.stringify({ ...resolutionResult, degradation }), duration]
   );
 
   // Sign the decision into the tamper-evident audit ledger, with the CHP
@@ -472,7 +570,7 @@ Provide the resolution plan and a summary of the resolution.`;
         foundation_score: assessment.score,
       },
     },
-    rationale: resolutionResult.resolution_summary,
+    rationale: `degradation=${degradation.level}/${degradation.tier_used ?? 'none'}; ${resolutionResult.resolution_summary}`,
   });
 
   await safeUpload(
@@ -523,7 +621,14 @@ export async function runPostMortemAgent(incidentId: string): Promise<{ action: 
     { role: 'user', content: `Incident: ${incident.title}\nSeverity: ${incident.severity}\nResolved: ${incident.resolved_at}\nResolution: ${incident.resolution_summary}\n\nFull agent history:\n${fullHistory}` }
   ];
 
-  const postMortemResult = await invokeClaudeJSON<PostMortemResult>(systemPrompt, messages, 3000);
+  const { json: postMortemJson, degradation } = await invokeWithDegradation(
+    'post-mortem',
+    { title: incident.title, description: incident.description, source: incident.source },
+    systemPrompt,
+    messages,
+    3000
+  );
+  const postMortemResult = postMortemJson as unknown as PostMortemResult;
 
   await query(
     `UPDATE incidents SET status = 'post_mortem', agent_notes = $1, updated_at = now() WHERE id = $2`,
@@ -533,7 +638,7 @@ export async function runPostMortemAgent(incidentId: string): Promise<{ action: 
   const duration = Date.now() - start;
   const actionResult = await query(
     `INSERT INTO agent_actions (incident_id, agent_type, action, input_data, output_data, status, duration_ms) VALUES ($1, 'post_mortem', 'post_mortem_analysis', $2, $3, 'completed', $4) RETURNING *`,
-    [incidentId, JSON.stringify({ incident_id: incidentId }), JSON.stringify(postMortemResult), duration]
+    [incidentId, JSON.stringify({ incident_id: incidentId }), JSON.stringify({ ...postMortemResult, degradation }), duration]
   );
 
   // Sign the decision into the tamper-evident audit ledger
@@ -542,7 +647,7 @@ export async function runPostMortemAgent(incidentId: string): Promise<{ action: 
     actor: 'post-mortem-agent',
     inputs: { incident_id: incidentId, severity: incident.severity, resolved_at: incident.resolved_at },
     sources: { agent_history: prevActions.map(a => ({ agent_type: a.agent_type, action: a.action, status: a.status })) },
-    rationale: `root_cause=${postMortemResult.root_cause || 'TBD'}; impact=${postMortemResult.impact_assessment || 'TBD'}`,
+    rationale: `degradation=${degradation.level}/${degradation.tier_used ?? 'none'}; root_cause=${postMortemResult.root_cause || 'TBD'}; impact=${postMortemResult.impact_assessment || 'TBD'}`,
   });
 
   // Upload post-mortem report to S3
