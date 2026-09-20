@@ -9,4 +9,6 @@ scripts/
 worklog.md
 # Signed audit ledger (runtime artifact)
 .audit/
+# CHP decision ledger (runtime artifact)
+.chp/
 *.tsbuildinfo

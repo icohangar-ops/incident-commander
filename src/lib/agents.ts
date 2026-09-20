@@ -3,6 +3,11 @@ import { invokeClaude, invokeClaudeJSON, type BedrockMessage } from './bedrock';
 import { uploadArtifact } from './s3';
 import type { Incident, AgentAction, RAGResult } from './types';
 import { getAuditLedger } from './audit/ledger';
+import { assessIncidentActionable } from './chp/r0';
+import { ResolutionGate } from './chp/gate';
+import { ChpRejection, type SessionStatus } from './chp/session';
+import { getChpDecisionLedger } from './chp/ledger';
+import type { GoldenSource } from './chp/foundation';
 
 // Append a decision/recommendation to the signed, tamper-evident audit ledger.
 // Non-blocking: a ledger failure must never fail an agent run.
@@ -298,7 +303,28 @@ interface ResolutionResult {
   follow_up_actions: string[];
 }
 
-export async function runResolutionAgent(incidentId: string): Promise<{ action: AgentAction; incident: Incident }> {
+export interface ResolutionGateSummary {
+  decision_id: string;
+  session_status: SessionStatus;
+  applied: boolean;
+  locked_by_human: boolean;
+  r0_verdict: string;
+  foundation_verdict: string;
+  foundation_score: number;
+  reason?: string;
+}
+
+export interface ResolutionAgentResult {
+  /** Null when CHP held the response for human confirmation. */
+  action: AgentAction | null;
+  incident: Incident;
+  gate: ResolutionGateSummary;
+}
+
+export async function runResolutionAgent(
+  incidentId: string,
+  opts?: { confirmedBy?: string }
+): Promise<ResolutionAgentResult> {
   const start = Date.now();
   const incResult = await query('SELECT * FROM incidents WHERE id = $1', [incidentId]);
   const incident = rowToIncident(incResult.rows[0] as Record<string, unknown>);
@@ -308,7 +334,38 @@ export async function runResolutionAgent(incidentId: string): Promise<{ action: 
   );
   const prevActions = actionsResult.rows.map(r => rowToAction(r as Record<string, unknown>));
 
-  const systemPrompt = `You are an automated resolution agent. Based on the investigation findings and incident context, execute a resolution plan. Provide concrete steps that were "executed" and a summary of the resolution.`;
+  // CHP R0 pre-flight — before ANY response action: an incident with no
+  // investigation evidence, or in a non-actionable status, can never ground
+  // one. Refuse here so the response model is not even invoked.
+  const preflight = assessIncidentActionable({
+    id: incident.id,
+    status: incident.status,
+    title: incident.title,
+    description: incident.description,
+    agent_notes: incident.agent_notes,
+    has_investigation: prevActions.some(a => a.agent_type === 'investigation'),
+  });
+  if (!preflight.ok) {
+    throw new ChpRejection(
+      `CHP R0 gate: the incident cannot ground a response action (${preflight.failed.join(', ')})`,
+      {
+        verdict: 'HALT',
+        results: {
+          Solvable: preflight.results.Solvable ?? 'PASS',
+          Scoped: 'PASS',
+          Valid: preflight.results.Valid ?? 'PASS',
+          Worth_it: 'PASS',
+        },
+        failed: preflight.failed,
+      }
+    );
+  }
+
+  const systemPrompt = `You are an automated resolution agent. Based on the investigation findings and incident context, propose a resolution plan.
+
+IMPORTANT — each resolution_plan step MUST begin with one of the allowed response verbs: restart, scale, rollback, failover, drain, reroute, patch, deploy, isolate, clear_cache, throttle, verify, inspect, monitor. Every step must name its explicit target (service, node, or deployment). Example: "clear_cache on payments-api edge nodes".
+
+Provide the resolution plan and a summary of the resolution.`;
 
   const prevContext = prevActions.map(a => `[${a.agent_type}] ${a.output_data || ''}`).join('\n\n');
 
@@ -317,6 +374,73 @@ export async function runResolutionAgent(incidentId: string): Promise<{ action: 
   ];
 
   const resolutionResult = await invokeClaudeJSON<ResolutionResult>(systemPrompt, messages);
+
+  const plan = (resolutionResult.resolution_plan ?? [])
+    .map(s => String(s))
+    .filter(s => s.trim().length > 0);
+
+  // Golden source for the deterministic adversary's parity check: the top
+  // runbook hit. Best-effort — parity is optional evidence, so a RAG failure
+  // degrades to "no golden source", never to a gate bypass.
+  let golden: GoldenSource | null = null;
+  try {
+    const ragHits = await searchSimilar(`${incident.title} ${incident.agent_notes ?? ''} runbook`, 5);
+    const hit = ragHits.find(r => r.source_type === 'runbook' && typeof r.similarity === 'number' && r.similarity >= 0.5);
+    if (hit) {
+      golden = { source_type: 'runbook', title: hit.title ?? 'runbook', content: hit.content, similarity: hit.similarity };
+    }
+  } catch (e) {
+    console.warn('CHP golden lookup skipped:', (e as Error).message);
+  }
+
+  const gateOutcome = new ResolutionGate(getChpDecisionLedger()).run({
+    incident: {
+      id: incident.id,
+      status: incident.status,
+      title: incident.title,
+      description: incident.description,
+      agent_notes: incident.agent_notes,
+      has_investigation: prevActions.some(a => a.agent_type === 'investigation'),
+    },
+    plan,
+    golden,
+    confirmedBy: opts?.confirmedBy,
+    timeline: prevActions.map(a => ({ agent_type: a.agent_type, action: a.action, status: a.status, created_at: a.created_at })),
+  });
+  const { decisionCase, assessment } = gateOutcome;
+
+  if (gateOutcome.outcome === 'HOLD') {
+    // Governance hold: nothing applied. Surface the hold through the repo's
+    // existing interfaces — incident notes (UI) and the audit ledger — and
+    // return the pending decision. A named confirmer applies it via
+    // POST /resolve with { "confirmed_by": "..." }.
+    await query(
+      `UPDATE incidents SET agent_notes = $1, updated_at = now() WHERE id = $2`,
+      [`${incident.agent_notes || ''}\n\n[CHP hold] ${gateOutcome.reason}\nPlan pending confirmation:\n${plan.map(s => `- ${s}`).join('\n')}`, incidentId]
+    );
+    recordDecision({
+      event: 'resolve_hold',
+      actor: 'resolution-agent',
+      inputs: { incident_id: incidentId, plan },
+      sources: { chp: { decision_id: decisionCase.decision_id, session_status: decisionCase.status } },
+      rationale: gateOutcome.reason,
+    });
+    const heldInc = await query('SELECT * FROM incidents WHERE id = $1', [incidentId]);
+    return {
+      action: null,
+      incident: rowToIncident(heldInc.rows[0] as Record<string, unknown>),
+      gate: {
+        decision_id: decisionCase.decision_id,
+        session_status: decisionCase.status,
+        applied: false,
+        locked_by_human: false,
+        r0_verdict: 'PASS',
+        foundation_verdict: assessment.verdict,
+        foundation_score: assessment.score,
+        reason: gateOutcome.reason,
+      },
+    };
+  }
 
   await query(
     `UPDATE incidents SET status = 'resolved', resolution_summary = $1, resolved_at = now(), updated_at = now() WHERE id = $2`,
@@ -329,15 +453,25 @@ export async function runResolutionAgent(incidentId: string): Promise<{ action: 
   const duration = Date.now() - start;
   const actionResult = await query(
     `INSERT INTO agent_actions (incident_id, agent_type, action, input_data, output_data, status, duration_ms) VALUES ($1, 'resolution', 'resolve_incident', $2, $3, 'completed', $4) RETURNING *`,
-    [incidentId, JSON.stringify({ incident_id: incidentId }), JSON.stringify(resolutionResult), duration]
+    [incidentId, JSON.stringify({ incident_id: incidentId, chp_decision_id: decisionCase.decision_id }), JSON.stringify(resolutionResult), duration]
   );
 
-  // Sign the decision into the tamper-evident audit ledger
+  // Sign the decision into the tamper-evident audit ledger, with the CHP
+  // decision reference so the two trails cross-link.
   recordDecision({
     event: 'resolve_incident',
     actor: 'resolution-agent',
     inputs: { incident_id: incidentId, severity: incident.severity },
-    sources: { prev_actions: prevActions.map(a => ({ agent_type: a.agent_type, action: a.action })) },
+    sources: {
+      prev_actions: prevActions.map(a => ({ agent_type: a.agent_type, action: a.action })),
+      chp: {
+        decision_id: decisionCase.decision_id,
+        session_status: decisionCase.status,
+        r0_verdict: 'PASS',
+        foundation_verdict: assessment.verdict,
+        foundation_score: assessment.score,
+      },
+    },
     rationale: resolutionResult.resolution_summary,
   });
 
@@ -350,6 +484,15 @@ export async function runResolutionAgent(incidentId: string): Promise<{ action: 
   return {
     action: rowToAction(actionResult.rows[0] as Record<string, unknown>),
     incident: rowToIncident(updatedInc.rows[0] as Record<string, unknown>),
+    gate: {
+      decision_id: decisionCase.decision_id,
+      session_status: decisionCase.status,
+      applied: true,
+      locked_by_human: gateOutcome.outcome === 'APPLIED' ? gateOutcome.lockedByHuman : false,
+      r0_verdict: 'PASS',
+      foundation_verdict: assessment.verdict,
+      foundation_score: assessment.score,
+    },
   };
 }
 

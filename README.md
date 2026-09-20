@@ -44,6 +44,17 @@ Incident Commander is a multi-agent AI system that autonomously triages, investi
 - **UiPath Intake**: Inbox and attachment handoffs can land incident payloads directly into the incident table
 - **Real-Time Dashboard**: Dark "mission control" UI with severity tracking
 
+## Consensus Hardening Protocol (CHP)
+
+Every agent **response action** (scaling, rollback, failover, restarts, cache clears) passes through a gate before it is applied — `src/lib/chp/`, modeled on the Consensus Hardening Protocol reference implementation:
+
+- **R0 gate** (`r0.ts`): before the response model is even invoked, the incident must be solvable, scoped, valid, and worth acting on from its own state (an investigation must exist, the incident must be actionable). Failures are fatal — nothing executes.
+- **Deterministic adversary** (`foundation.ts`): the proposed plan is scored *deterministically*, not by the LLM — guardrails (well-formed, allowed-verb, named-target steps) **40**, bounded plan **30**, golden-source parity vs. the top runbook hit **30** (where a golden source exists). A plan that contradicts its golden source is fatal. General floor: **70**.
+- **Human lock** (`session.ts`, `gate.ts`): sessions start `EXPLORING`; irreversible plans (restarts, rollbacks, failovers, deployments, isolation) are held at `PROVISIONAL_LOCK` and require a named human confirmer before `LOCKED`. Default is ON (`CHP_REQUIRE_HUMAN_LOCK=1`); set it to `0` only to allow self-certified reversible actions on the provisional lock. Irreversible actions are held even with the flag off.
+- **Decision ledger** (`ledger.ts`): every decision is appended to an append-only JSONL ledger (`.chp/decisions.jsonl`) with a SHA-256 `body_sha256` over the sealed decision body, revalidated on read (`envelope_valid`, `integrity_valid`) and keyed to the incident timeline. Entries also cross-link into the signed audit ledger.
+
+**API behavior**: `POST /api/incidents/:id/resolve` accepts an optional `{"confirmed_by": "..."}` body — without a confirmer, held decisions return **202** with the pending decision; with a named confirmer, the plan locks and applies (**200**); a fatal CHP refusal returns **422** with the R0 evaluation.
+
 ## Tech Stack
 
 | Component | Technology |
