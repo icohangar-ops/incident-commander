@@ -101,11 +101,15 @@ export async function probeBedrockProtocol(): Promise<ProtocolHealthReport> {
     };
   } catch (e) {
     const reason = classifyBedrockError(e);
+    // Full SDK detail goes to server logs ONLY. The report envelope must not
+    // carry raw provider exception text — AWS error messages can leak IAM
+    // principal ARNs, account IDs, and denied actions (HIGH finding on #4).
+    console.error(`[protocol-health] probe failed (${reason}):`, e);
     return {
       protocol: 'bedrock-invoke',
       healthy: false,
       reason_code: reason,
-      reason: `${REASON_HINTS[reason]} (${(e as Error).message || String(e)})`,
+      reason: REASON_HINTS[reason],
       model_id: MODEL_ID,
       checked_at: checkedAt,
       latency_ms: Date.now() - start,

@@ -121,6 +121,17 @@ CREATE TABLE runbooks (
 CREATE VECTOR INDEX idx_runbook_vec ON runbooks (embedding);
 ```
 
+## Operational Endpoints
+
+Two health surfaces with different contracts — do not confuse them:
+
+- **`GET /api/health`** — plain liveness. No authentication, no external calls. Load balancers and k8s probes should use this one.
+- **`GET /api/health/protocol`** — the row 19 Bedrock protocol probe (real minimal `InvokeModel` handshake, reason codes, latency, response-schema fingerprint). This endpoint is **not** a liveness probe:
+  - It answers HTTP 200 with the report envelope in both healthy and unhealthy protocol states (the probe outcome is the payload, not a status code); authorization failures answer plain 403.
+  - It is **authenticated and fail-closed**: every request needs the `x-protocol-health-token` header matching the `PROTOCOL_HEALTH_TOKEN` environment variable. When that variable is unset, the endpoint answers 403 and never calls the model — a missing secret disables the endpoint rather than opening it.
+  - Probe reports are cached in-process for `PROTOCOL_HEALTH_TTL_MS` (default 60000 ms), so authorized polling cannot amplify into one Bedrock call per request.
+  - Failure envelopes carry classified reason codes and fixed human-readable hints only; raw AWS SDK exception text goes to server logs, never to the response body.
+
 ## Signed Audit Ledger
 
 Every decision an agent produces (triage, investigation, resolution, post-mortem)
